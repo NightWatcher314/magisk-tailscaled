@@ -62,6 +62,7 @@ program(){
     log Info "Starting ${program_name} service."
     if is_running; then return 0; fi 
     if ! command -v "$program_name" > /dev/null 2>&1; then log Error "program not found: ${program_name}"; return 1; fi
+    mkdir -p "${logdir}"
     [ -f "${log_file}" ] && mv "${log_file}" "${log_file}.bak" # log for old output
     if [ ! -z "${pre_up}" ];then $pre_up  2>&1; fi
     # shellcheck disable=SC2086
@@ -111,7 +112,7 @@ program(){
       # try forcing it to shut down.
       log Warning "⚠️ try forcing it to shut down."
       # Use `busybox pkill` to kill the binary with signal 9, otherwise use `killall`.
-      if busybox pkill -9 "${command}"; then
+      if busybox pkill -f -9 "${command}"; then
         : # Do nothing if busybox pkill is successful
       else
         if command -v killall >/dev/null 2>&1; then
@@ -123,7 +124,7 @@ program(){
       sleep 2
       if ! busybox pgrep -f "${command}" >/dev/null 2>&1; then
         log Info "✔ done, you can sleep peacefully."
-        if [ ! -z "${post_down}" ];then post_down  2>&1; fi
+        if [ ! -z "${post_down}" ];then $post_down  2>&1; fi
         [ -t 1 ] && echo "${yellow}--------------------------------------------${normal}"
         return 0
       fi
@@ -136,7 +137,7 @@ program(){
     program start
   }
   
-  $1
+  "$1"
 }
 
 _tailscaled(){
@@ -469,6 +470,9 @@ case "$1" in
   restart)
     _tailscaled restart
     ;;
+  apply)
+    tailscaled.config up
+    ;;
   status)
     status_tailscaled "$2"
     ;;
@@ -484,7 +488,7 @@ case "$1" in
   *)
     if [ -n "$1" ]; then
       echo "${yellow}${scripts_name} ${orange}$1 ${red}not found${normal}, run ${yellow}${scripts_name} help${normal} for all commands"
-      return
+      exit 1
     fi
     usage
     ;;

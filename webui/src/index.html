@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Magisk Tailscaled</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>Magisk Tailscaled</h1>
+      <button id="refresh" class="ghost">Refresh</button>
+    </header>
+
+    <section class="grid">
+      <article class="card"><span>Daemon</span><strong id="daemon">Loading</strong></article>
+      <article class="card"><span>Backend</span><strong id="backend">-</strong></article>
+      <article class="card"><span>Tailscale IP</span><strong id="ip">-</strong></article>
+      <article class="card"><span>Peers</span><strong id="peers">-</strong></article>
+    </section>
+
+    <section class="panel">
+      <h2>Actions</h2>
+      <div class="button-group">
+        <button id="login" class="btn">Login</button>
+        <button id="up" class="btn primary">Apply / Up</button>
+        <button id="down" class="btn warning">Down</button>
+        <button id="restart" class="btn secondary">Restart Daemon</button>
+      </div>
+      <pre id="output" class="output">Ready.</pre>
+    </section>
+
+    <section class="panel">
+      <h2>Configuration</h2>
+      <label><input id="startOnBoot" type="checkbox"> Start tailscaled on boot</label>
+      <label><input id="enableSsh" type="checkbox"> Advertise Tailscale SSH</label>
+      <label>Hostname <input id="hostname" placeholder="optional"></label>
+      <label>tailscale up args <input id="upArgs" placeholder="--accept-dns=false"></label>
+      <label>Extra up args <input id="extraUpArgs" placeholder="--advertise-routes=... or --exit-node=..."></label>
+      <label>tailscaled daemon args <input id="daemonArgs" placeholder="-no-logs-no-support"></label>
+      <div class="button-group"><button id="save" class="btn primary">Save config</button></div>
+      <p class="hint">Config is stored at <code>/data/adb/tailscale/config.env</code>. Saving does not run arbitrary shell; only known keys are accepted by <code>tailscaled.config</code>.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Recent service log</h2>
+      <pre id="log" class="output small">Loading...</pre>
+    </section>
+  </main>
+  <script type="module" src="app.ts"></script>
+</body>
+</html>

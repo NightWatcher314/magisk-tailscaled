@@ -10,11 +10,42 @@
 } || true
 
 # Github download helper
+verify_sha256() {
+	FILE=$1
+	EXPECTED=$2
+	[ -n "$EXPECTED" ] || return 0
+	if command -v sha256sum >/dev/null 2>&1; then
+		ACTUAL=$(sha256sum "$FILE" | awk '{print $1}')
+	elif command -v busybox >/dev/null 2>&1 && busybox sha256sum "$FILE" >/dev/null 2>&1; then
+		ACTUAL=$(busybox sha256sum "$FILE" | awk '{print $1}')
+	else
+		ui_print "! sha256sum not available; refusing unverified binary download"
+		return 1
+	fi
+	[ "$ACTUAL" = "$EXPECTED" ] || { ui_print "! SHA256 mismatch for $(basename "$FILE")"; ui_print "! expected: $EXPECTED"; ui_print "! actual:   $ACTUAL"; return 1; }
+}
+
+manifest_lookup() {
+	KEY=$1
+	[ -f "$MODPATH/tailscale/binary-manifest.sh" ] || return 1
+	# shellcheck source=/dev/null
+	. "$MODPATH/tailscale/binary-manifest.sh"
+	eval "printf %s \"\${$KEY:-}\""
+}
+
+# Github download helper; prefers pinned manifest URLs and verifies sha256 when available.
 gh_download() {
 	REPO=$1
 	MATCH=$2
-	DOWNLOAD_URL=$(
-		wget --no-check-certificate --timeout=10 -qO- "https://api.github.com/repos/${REPO}/releases/latest" |
+	MANIFEST_PREFIX=${3:-}
+	DOWNLOAD_URL=""
+	EXPECTED_SHA=""
+	if [ -n "$MANIFEST_PREFIX" ]; then
+		DOWNLOAD_URL=$(manifest_lookup "${MANIFEST_PREFIX}_URL" || true)
+		EXPECTED_SHA=$(manifest_lookup "${MANIFEST_PREFIX}_SHA256" || true)
+	fi
+	[ -n "$DOWNLOAD_URL" ] || DOWNLOAD_URL=$(
+		wget --timeout=10 -qO- "https://api.github.com/repos/${REPO}/releases/latest" |
 			grep "browser_download_url" |
 			grep "${MATCH}" |
 			sed 's/.*"browser_download_url": "\([^"]*\)".*/\1/' ||
@@ -26,10 +57,11 @@ gh_download() {
 	fi
 	FILENAME=$(basename "$DOWNLOAD_URL")
 	ui_print "- Downloading $FILENAME..."
-	wget --no-check-certificate --timeout=100 -qO "$TMPDIR/$FILENAME" "$DOWNLOAD_URL" || {
+	wget --timeout=100 -qO "$TMPDIR/$FILENAME" "$DOWNLOAD_URL" || {
 		ui_print "! Download timeout or failed"
 		return 1
 	}
+	verify_sha256 "$TMPDIR/$FILENAME" "$EXPECTED_SHA" || return 1
 }
 
 # shellcheck disable=SC2034
@@ -79,19 +111,20 @@ if [ -d "$TS_DIR" ]; then
 	done
 fi
 
-mkdir -p "$TS_BIN_DIR"
+mkdir -p "$TS_BIN_DIR" "$MODPATH/tailscale"
+unzip -qqo "$ZIPFILE" 'tailscale/binary-manifest.sh' -d "$MODPATH" 2>/dev/null || true
 unzip -qqjo "$ZIPFILE" "tailscale/bin/*-$ARCH" -d "$TS_BIN_DIR" 2>/dev/null || true
 for f in "$TS_BIN_DIR"/*-"$ARCH"; do
 	[ -f "$f" ] && mv "$f" "${f%-"$ARCH"}"
 done
 
 [ -f "$TS_BIN_DIR/tailscaled" ] || {
-	gh_download "anasfanani/tailscale-android-cli" "tailscale_.*_${ARCH}\.tgz" || abort "error: Unable to download."
-	tar -xzf "$TMPDIR/$FILENAME" -C $TS_BIN_DIR || abort "error: Unable extract archive."
+	gh_download "anasfanani/tailscale-android-cli" "tailscale_.*_${ARCH}\.tgz" "TAILSCALE_${ARCH}" || abort "error: Unable to download."
+	tar -xzf "$TMPDIR/$FILENAME" -C "$TS_BIN_DIR" || abort "error: Unable extract archive."
 }
 
 [ -f "$TS_BIN_DIR/jq" ] || {
-	gh_download "theshoqanebi/jq-build-for-android" "jq-${F_ARCH}-linux-android" || abort "error: Unable to download."
+	gh_download "theshoqanebi/jq-build-for-android" "jq-${F_ARCH}-linux-android" "JQ_${ARCH}" || abort "error: Unable to download."
 	mv -f "$TMPDIR/$FILENAME" "$TS_BIN_DIR/jq" || abort "error: Unable to move file."
 }
 
@@ -101,6 +134,7 @@ unzip -qqo "$ZIPFILE" -x 'META-INF/*' 'tailscale/*' -d "$MODPATH"
 mkdir -p "$TS_DIR" "$TS_SCRIPTS_DIR" "$SERVICE_DIR" "$MODPATH/system/bin/"
 unzip -qqjo "$ZIPFILE" 'tailscale/scripts/*' -d "$TS_SCRIPTS_DIR"
 unzip -qqjo "$ZIPFILE" 'tailscale/settings.sh' -d "$TS_DIR"
+[ -f "$TS_DIR/config.env" ] || sh "$TS_SCRIPTS_DIR/tailscaled.config" init 2>/dev/null || true
 ln -sf "$TS_BIN_DIR/tailscaled" "$TS_BIN_DIR/tailscale"
 ln -sf "$TS_BIN_DIR/"* "$MODPATH/system/bin/"
 

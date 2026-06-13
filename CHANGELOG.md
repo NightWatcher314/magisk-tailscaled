@@ -1,3 +1,12 @@
+## v2.1.0.0
+
+- Add KernelSU/APatch WebUI for status, login/up/down, daemon restart, runtime configuration, and recent logs.
+- Add `/data/adb/tailscale/config.env` plus `tailscaled.config` for auditable configuration management.
+- Generate pinned binary download manifests during build and verify SHA256 for lightweight installs.
+- Remove insecure `--no-check-certificate` downloads and improve service path/log robustness.
+- Align README with the current v2 daemon behavior and document known limitations.
+- Make release builds independent of the host `zip` binary by using Python zipfile.
+
 ## v2.0.0.1
 
 - 429e1b0 build: fix version bump and add pre-release for build version

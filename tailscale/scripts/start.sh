@@ -4,12 +4,13 @@ DIR=$(dirname "$(realpath "$0")")
 . "$DIR"/../settings.sh
 case "$1" in
     postinstall)
-      rm -rf $TS_RUN_DIR && mkdir -p $TS_RUN_DIR
+      rm -rf "$TS_RUN_DIR" && mkdir -p "$TS_RUN_DIR"
       tailscaled.service restart >> "/dev/null" 2>&1 &
-      return 0
+      exit 0
     ;;
 esac
 start_service() {
+  case "${TS_START_ON_BOOT:-1}" in 0|false) log Info "Autostart disabled by ${TS_CONFIG_FILE}."; return 0;; esac
   if [ ! -f "${TS_MOD_DIR}/disable" ]; then
     tailscaled.service start >> "/dev/null" 2>&1
   fi
