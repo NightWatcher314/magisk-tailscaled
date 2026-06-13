@@ -1,3 +1,8 @@
+## v2.1.2.0
+
+- Keep unsaved WebUI checkbox/text changes from being overwritten by the 10-second status refresh.
+- Add an explicit unsaved/saved hint below Save config so it is clear when Save config or Apply / Up is still needed.
+
 ## v2.1.1.0
 
 - Fix WebUI action buttons by invoking `/data/adb/tailscale/scripts/tailscaled.config` through an absolute path.

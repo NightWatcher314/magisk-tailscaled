@@ -1,7 +1,7 @@
 id=magisk-tailscaled
 name=Magisk Tailscaled
-version=v2.1.1.0
-versionCode=02010100
+version=v2.1.2.0
+versionCode=02010200
 author=anasfanani, NightWatcher314
 description=Tailscale daemon for rooted Android with safer pinned downloads and WebUI configuration.
 updateJson=https://raw.githubusercontent.com/NightWatcher314/magisk-tailscaled/main/update.json

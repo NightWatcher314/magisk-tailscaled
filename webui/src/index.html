@@ -55,6 +55,7 @@
       <label>Extra up args <input id="extraUpArgs" placeholder="advanced args, e.g. --advertise-tags=tag:phone"></label>
       <label>tailscaled daemon args <input id="daemonArgs" placeholder="-no-logs-no-support"></label>
       <div class="button-group"><button id="save" class="btn primary">Save config</button></div>
+      <p id="dirty" class="hint">Saved.</p>
       <p class="hint">Config is stored at <code>/data/adb/tailscale/config.env</code>. The WebUI calls the helper by absolute path so it works even when KernelSU does not inherit module PATH.</p>
     </section>
 

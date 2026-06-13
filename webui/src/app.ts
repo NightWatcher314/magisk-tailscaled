@@ -6,6 +6,7 @@ type Peer = { HostName?: string; DNSName?: string; TailscaleIPs?: string[]; Exit
 const HELPER = '/data/adb/tailscale/scripts/tailscaled.config';
 const isAndroidApp = typeof window.Android !== 'undefined';
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+let configDirty = false;
 const input = (id: string) => $(id) as HTMLInputElement;
 const select = (id: string) => $(id) as HTMLSelectElement;
 
@@ -21,6 +22,11 @@ async function exec(command: string): Promise<string> {
 }
 const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 async function getJson<T>(cmd: string, fallback: T): Promise<T> { try { return JSON.parse(await exec(cmd)); } catch { return fallback; } }
+function setDirty(dirty = true) {
+  configDirty = dirty;
+  const el = document.getElementById('dirty');
+  if (el) el.textContent = dirty ? 'Unsaved changes - tap Save config or Apply / Up.' : 'Saved.';
+}
 function setOutput(text: string) {
   const el = $('output');
   const escaped = (text || 'OK').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]!));
@@ -31,7 +37,7 @@ const run = async (cmd: string) => { const out = await exec(cmd); setOutput(out)
 function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
 function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
 function removeArgs(args: string[], prefixes: string[]) { return args.filter(a => !prefixes.some(p => a === p || a.startsWith(`${p}=`))); }
-function buildArgsFromUi() {
+function buildArgsFromUi(markDirty = true) {
   let args: string[] = [];
   if (input('acceptDns').checked) args.push('--accept-dns=false');
   if (input('acceptRoutes').checked) args.push('--accept-routes=true');
@@ -43,6 +49,7 @@ function buildArgsFromUi() {
     if (input('allowLan').checked) args.push('--exit-node-allow-lan-access=true');
   }
   input('upArgs').value = args.join(' ');
+  if (markDirty) setDirty(true);
   return input('upArgs').value;
 }
 function populateArgsUi(upArgs: string) {
@@ -57,7 +64,7 @@ function populateArgsUi(upArgs: string) {
   const known = ['--accept-dns', '--accept-dns=false', '--accept-routes', '--accept-routes=true', '--ssh', '--advertise-exit-node', '--exit-node', '--exit-node-allow-lan-access', '--shields-up'];
   const leftovers = removeArgs(args, known);
   if (!input('extraUpArgs').value) input('extraUpArgs').value = leftovers.join(' ');
-  buildArgsFromUi();
+  buildArgsFromUi(false);
 }
 function loadExitNodes(status: any, selected?: string) {
   const old = selected ?? select('exitNode').value;
@@ -83,6 +90,10 @@ async function refresh() {
   const peers = status.Peer ? Object.values(status.Peer) as Peer[] : [];
   $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} online / ${peers.length} total` : '-';
   const cfg: any = await getJson(`sh ${HELPER} get 2>/dev/null || echo "{}"`, {});
+  if (configDirty) {
+    $('log').textContent = await exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true');
+    return;
+  }
   const exitArg = String(cfg.upArgs || '').split(/\s+/).find((a: string) => a.startsWith('--exit-node='));
   loadExitNodes(status, exitArg ? exitArg.slice('--exit-node='.length) : undefined);
   input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true';
@@ -104,6 +115,7 @@ async function saveConfig() {
     ['TS_DAEMON_ARGS', input('daemonArgs').value],
   ];
   for (const [key, value] of pairs) await exec(`sh ${HELPER} set ${key} ${shq(value)}`);
+  setDirty(false);
   setOutput('Config saved. Use Apply / Up to apply tailscale up args, or Restart Daemon for daemon args.');
   await refresh();
 }
@@ -114,7 +126,8 @@ function init() {
   $('down').addEventListener('click', () => run(`sh ${HELPER} down`));
   $('restart').addEventListener('click', () => run(`sh ${HELPER} restart`));
   $('save').addEventListener('click', saveConfig);
-  ['acceptDns','acceptRoutes','tailscaleSsh','advertiseExitNode','allowLan','shieldsUp','exitNode'].forEach(id => $(id).addEventListener('change', buildArgsFromUi));
+  ['startOnBoot','acceptDns','acceptRoutes','tailscaleSsh','advertiseExitNode','allowLan','shieldsUp','exitNode'].forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
+  ['hostname','extraUpArgs','daemonArgs'].forEach(id => $(id).addEventListener('input', () => setDirty(true)));
   refresh(); setInterval(refresh, 10000);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
