@@ -28,19 +28,34 @@
         <button id="down" class="btn warning">Down</button>
         <button id="restart" class="btn secondary">Restart Daemon</button>
       </div>
-      <pre id="output" class="output">Ready.</pre>
+      <div id="output" class="output">Ready.</div>
     </section>
 
     <section class="panel">
-      <h2>Configuration</h2>
+      <h2>Common tailscale up options</h2>
+      <div class="checks">
+        <label><input id="acceptDns" type="checkbox"> Disable Tailscale DNS (<code>--accept-dns=false</code>)</label>
+        <label><input id="acceptRoutes" type="checkbox"> Accept subnet routes (<code>--accept-routes=true</code>)</label>
+        <label><input id="tailscaleSsh" type="checkbox"> Advertise Tailscale SSH (<code>--ssh</code>)</label>
+        <label><input id="advertiseExitNode" type="checkbox"> Advertise this phone as an exit node</label>
+        <label><input id="allowLan" type="checkbox"> Allow LAN access when using an exit node</label>
+        <label><input id="shieldsUp" type="checkbox"> Shields-up mode</label>
+      </div>
+      <label>Use exit node
+        <select id="exitNode"><option value="">None / clear exit node</option></select>
+      </label>
+      <p class="hint">Exit-node choices are loaded from peers that advertise <code>ExitNodeOption</code>. Save config, then Apply / Up.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Advanced configuration</h2>
       <label><input id="startOnBoot" type="checkbox"> Start tailscaled on boot</label>
-      <label><input id="enableSsh" type="checkbox"> Advertise Tailscale SSH</label>
       <label>Hostname <input id="hostname" placeholder="optional"></label>
-      <label>tailscale up args <input id="upArgs" placeholder="--accept-dns=false"></label>
-      <label>Extra up args <input id="extraUpArgs" placeholder="--advertise-routes=... or --exit-node=..."></label>
+      <label>Generated tailscale up args <input id="upArgs" readonly placeholder="--accept-dns=false"></label>
+      <label>Extra up args <input id="extraUpArgs" placeholder="advanced args, e.g. --advertise-tags=tag:phone"></label>
       <label>tailscaled daemon args <input id="daemonArgs" placeholder="-no-logs-no-support"></label>
       <div class="button-group"><button id="save" class="btn primary">Save config</button></div>
-      <p class="hint">Config is stored at <code>/data/adb/tailscale/config.env</code>. Saving does not run arbitrary shell; only known keys are accepted by <code>tailscaled.config</code>.</p>
+      <p class="hint">Config is stored at <code>/data/adb/tailscale/config.env</code>. The WebUI calls the helper by absolute path so it works even when KernelSU does not inherit module PATH.</p>
     </section>
 
     <section class="panel">

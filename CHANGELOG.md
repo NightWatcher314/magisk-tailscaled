@@ -1,3 +1,10 @@
+## v2.1.1.0
+
+- Fix WebUI action buttons by invoking `/data/adb/tailscale/scripts/tailscaled.config` through an absolute path.
+- Render login output URLs as clickable links.
+- Add common `tailscale up` checkboxes and an exit-node selector populated from peers advertising `ExitNodeOption`.
+- Save common options before Apply / Up so exit-node and checkbox settings are applied in one tap.
+
 ## v2.1.0.0
 
 - Add KernelSU/APatch WebUI for status, login/up/down, daemon restart, runtime configuration, and recent logs.
