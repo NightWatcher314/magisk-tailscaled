@@ -1,3 +1,9 @@
+## v2.1.3.0
+
+- Add a WebUI/runtime control server URL setting backed by `TS_LOGIN_SERVER`,
+  so login and apply/up can target Headscale-compatible servers with
+  `--login-server`.
+
 ## v2.1.2.0
 
 - Keep unsaved WebUI checkbox/text changes from being overwritten by the 10-second status refresh.

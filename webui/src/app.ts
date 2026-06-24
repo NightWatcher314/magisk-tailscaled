@@ -36,7 +36,26 @@ const run = async (cmd: string) => { const out = await exec(cmd); setOutput(out)
 
 function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
 function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
-function removeArgs(args: string[], prefixes: string[]) { return args.filter(a => !prefixes.some(p => a === p || a.startsWith(`${p}=`))); }
+function getArgValue(args: string[], flag: string) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === flag) return args[i + 1] || '';
+    if (arg.startsWith(`${flag}=`)) return arg.slice(flag.length + 1);
+  }
+  return '';
+}
+function removeArgs(args: string[], prefixes: string[], consumeValueFor: string[] = []) {
+  const kept: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const matched = prefixes.find(p => args[i] === p || args[i].startsWith(`${p}=`));
+    if (!matched) {
+      kept.push(args[i]);
+      continue;
+    }
+    if (consumeValueFor.includes(matched) && args[i] === matched && args[i + 1] && !args[i + 1].startsWith('-')) i += 1;
+  }
+  return kept;
+}
 function buildArgsFromUi(markDirty = true) {
   let args: string[] = [];
   if (input('acceptDns').checked) args.push('--accept-dns=false');
@@ -61,8 +80,8 @@ function populateArgsUi(upArgs: string) {
   input('shieldsUp').checked = hasArg(args, '--shields-up=true') || args.includes('--shields-up');
   const exitArg = args.find(a => a.startsWith('--exit-node='));
   if (exitArg) select('exitNode').value = exitArg.slice('--exit-node='.length);
-  const known = ['--accept-dns', '--accept-dns=false', '--accept-routes', '--accept-routes=true', '--ssh', '--advertise-exit-node', '--exit-node', '--exit-node-allow-lan-access', '--shields-up'];
-  const leftovers = removeArgs(args, known);
+  const known = ['--accept-dns', '--accept-dns=false', '--accept-routes', '--accept-routes=true', '--ssh', '--advertise-exit-node', '--exit-node', '--exit-node-allow-lan-access', '--shields-up', '--login-server'];
+  const leftovers = removeArgs(args, known, ['--exit-node', '--login-server']);
   if (!input('extraUpArgs').value) input('extraUpArgs').value = leftovers.join(' ');
   buildArgsFromUi(false);
 }
@@ -94,14 +113,18 @@ async function refresh() {
     $('log').textContent = await exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true');
     return;
   }
-  const exitArg = String(cfg.upArgs || '').split(/\s+/).find((a: string) => a.startsWith('--exit-node='));
+  const upArgs = String(cfg.upArgs || '');
+  const extraUpArgs = String(cfg.extraUpArgs || '');
+  const exitArg = upArgs.split(/\s+/).find((a: string) => a.startsWith('--exit-node='));
+  const loginServer = cfg.loginServer || getArgValue(splitArgs(`${upArgs} ${extraUpArgs}`), '--login-server');
   loadExitNodes(status, exitArg ? exitArg.slice('--exit-node='.length) : undefined);
   input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true';
   input('tailscaleSsh').checked = cfg.enableSsh === '1' || cfg.enableSsh === 'true' || splitArgs(cfg.upArgs || '').includes('--ssh');
+  input('loginServer').value = loginServer || '';
   input('hostname').value = cfg.hostname || '';
-  input('extraUpArgs').value = cfg.extraUpArgs || '';
+  input('extraUpArgs').value = removeArgs(splitArgs(extraUpArgs), ['--login-server'], ['--login-server']).join(' ');
   input('daemonArgs').value = cfg.daemonArgs || '';
-  populateArgsUi(cfg.upArgs || '');
+  populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' '));
   $('log').textContent = await exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true');
 }
 async function saveConfig() {
@@ -109,6 +132,7 @@ async function saveConfig() {
   const pairs: [string,string][] = [
     ['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'],
     ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'],
+    ['TS_LOGIN_SERVER', input('loginServer').value.trim()],
     ['TS_HOSTNAME', input('hostname').value],
     ['TS_UP_ARGS', input('upArgs').value],
     ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value],
@@ -127,7 +151,7 @@ function init() {
   $('restart').addEventListener('click', () => run(`sh ${HELPER} restart`));
   $('save').addEventListener('click', saveConfig);
   ['startOnBoot','acceptDns','acceptRoutes','tailscaleSsh','advertiseExitNode','allowLan','shieldsUp','exitNode'].forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
-  ['hostname','extraUpArgs','daemonArgs'].forEach(id => $(id).addEventListener('input', () => setDirty(true)));
+  ['loginServer','hostname','extraUpArgs','daemonArgs'].forEach(id => $(id).addEventListener('input', () => setDirty(true)));
   refresh(); setInterval(refresh, 10000);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

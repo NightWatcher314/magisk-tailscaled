@@ -36,8 +36,9 @@ KernelSU/APatch users can open the module WebUI to:
 
 - View daemon/backend status, Tailscale IPs, peer counts, and recent logs.
 - Run login, up/apply, down, and daemon restart.
-- Configure boot autostart, hostname, Tailscale SSH, common `tailscale up`
-  checkboxes, exit-node selection, extra advanced up args, and daemon args.
+- Configure boot autostart, control server URL for Headscale, hostname,
+  Tailscale SSH, common `tailscale up` checkboxes, exit-node selection, extra
+  advanced up args, and daemon args.
 
 The WebUI writes `/data/adb/tailscale/config.env` through `tailscaled.config`.
 It does not accept arbitrary config keys.
@@ -66,6 +67,14 @@ You can change daemon args with:
 ```sh
 su -c "tailscaled.config set TS_DAEMON_ARGS '-no-logs-no-support'"
 su -c tailscaled.config restart
+```
+
+To use a Headscale or other compatible control server:
+
+```sh
+su -c "tailscaled.config set TS_LOGIN_SERVER 'https://headscale.example.com'"
+su -c tailscaled.config login
+su -c tailscaled.config up
 ```
 
 ## Known limitations

@@ -1,6 +1,6 @@
 {
-  "version": "v2.1.2.0",
-  "versionCode": "02010200",
-  "zipUrl": "https://github.com/NightWatcher314/magisk-tailscaled/releases/download/v2.1.2.0/Magisk-Tailscaled-v2.1.2.0.zip",
+  "version": "v2.1.3.0",
+  "versionCode": "02010300",
+  "zipUrl": "https://github.com/NightWatcher314/magisk-tailscaled/releases/download/v2.1.3.0/Magisk-Tailscaled-v2.1.3.0.zip",
   "changelog": "https://raw.githubusercontent.com/NightWatcher314/magisk-tailscaled/main/CHANGELOG.md"
 }

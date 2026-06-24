@@ -10,6 +10,10 @@ fi
 
 CURRENT=$(grep '^version=' module.prop | cut -d'=' -f2 | tr -d 'v')
 IFS='.' read -r MAJOR MINOR PATCH BUILD <<< "$CURRENT"
+ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || echo "https://github.com/NightWatcher314/magisk-tailscaled.git")
+REPO_SLUG=$(printf '%s' "$ORIGIN_URL" | sed -E 's#^git@github.com:##; s#^https://github.com/##; s#\.git$##')
+DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk -F': ' '/HEAD branch/ { print $2; exit }')
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 
 case $BUMP_TYPE in
   major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0; BUILD=0 ;;
@@ -50,8 +54,8 @@ sed -i "s/^versionCode=.*/versionCode=$NEW_VERSION_CODE/" module.prop
 # TODO: Remove update-arm.json and update-arm64.json, use single update.json instead
 # Update all JSON files
 for json_file in update.json update-arm.json update-arm64.json; do
-  jq --arg v "$NEW_VERSION" --arg vc "$NEW_VERSION_CODE" \
-    '.version = $v | .versionCode = $vc | .zipUrl = "https://github.com/anasfanani/Magisk-Tailscaled/releases/download/\($v)/Magisk-Tailscaled-\($v).zip" | .changelog = "https://raw.githubusercontent.com/anasfanani/Magisk-Tailscaled/master/CHANGELOG.md"' \
+  jq --arg v "$NEW_VERSION" --arg vc "$NEW_VERSION_CODE" --arg repo "$REPO_SLUG" --arg branch "$DEFAULT_BRANCH" \
+    '.version = $v | .versionCode = $vc | .zipUrl = "https://github.com/\($repo)/releases/download/\($v)/Magisk-Tailscaled-\($v).zip" | .changelog = "https://raw.githubusercontent.com/\($repo)/\($branch)/CHANGELOG.md"' \
     "$json_file" > "${json_file}.tmp" && mv "${json_file}.tmp" "$json_file"
 done
 
@@ -62,4 +66,3 @@ echo "  git add module.prop update*.json CHANGELOG.md"
 echo "  git commit -m 'Bump version to $NEW_VERSION'"
 echo "  git tag $NEW_VERSION"
 echo "  git push && git push --tags"
-

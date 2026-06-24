@@ -16,6 +16,8 @@ Supported keys:
 - `TS_START_ON_BOOT` - `1` or `0`; controls service autostart.
 - `TS_DAEMON_ARGS` - arguments for the `tailscaled` daemon.
 - `TS_UP_ARGS` - default arguments for `tailscale up`.
+- `TS_LOGIN_SERVER` - optional control/login server URL, for example a
+  Headscale server. Blank uses the official Tailscale control plane.
 - `TS_HOSTNAME` - optional `--hostname` value.
 - `TS_ENABLE_SSH` - `1` adds `--ssh` to `tailscale up`.
 - `TS_EXTRA_UP_ARGS` - extra advanced `tailscale up` arguments.
@@ -27,6 +29,7 @@ The helper only accepts known keys and writes shell-quoted values.
 
 ```sh
 tailscaled.config get
+tailscaled.config set TS_LOGIN_SERVER 'https://headscale.example.com'
 tailscaled.config set TS_UP_ARGS '--accept-dns=false'
 tailscaled.config up
 tailscaled.config down
