@@ -1,3 +1,7 @@
+## v2.1.4.0
+
+- e9370e4 Fix WebUI Headscale login hangs
+
 ## v2.1.3.0
 
 - Add a WebUI/runtime control server URL setting backed by `TS_LOGIN_SERVER`,
