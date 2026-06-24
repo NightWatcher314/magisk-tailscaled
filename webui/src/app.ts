@@ -22,6 +22,18 @@ async function exec(command: string): Promise<string> {
 }
 const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 async function getJson<T>(cmd: string, fallback: T): Promise<T> { try { return JSON.parse(await exec(cmd)); } catch { return fallback; } }
+function normalizeLoginServer(value: string) {
+  let url = value.trim().replace(/\/+$/, '');
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
 function setDirty(dirty = true) {
   configDirty = dirty;
   const el = document.getElementById('dirty');
@@ -33,6 +45,13 @@ function setOutput(text: string) {
   el.innerHTML = escaped.replace(/https?:\/\/[^\s<]+/g, url => `<a href="${url}" target="_blank" rel="noreferrer">${url}</a>`).replace(/\n/g, '<br>');
 }
 const run = async (cmd: string) => { const out = await exec(cmd); setOutput(out); await refresh(); return out; };
+const runQuick = async (cmd: string, message: string) => {
+  setOutput(message);
+  const out = await exec(cmd);
+  setOutput(out);
+  await refresh();
+  return out;
+};
 
 function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
 function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
@@ -103,9 +122,9 @@ function loadExitNodes(status: any, selected?: string) {
 async function refresh() {
   const daemonOut = await exec('tailscaled.service status >/dev/null 2>&1 && echo running || echo stopped');
   $('daemon').textContent = daemonOut.trim();
-  const status: any = await getJson('tailscale status --json 2>/dev/null || echo "{}"', {});
+  const status: any = await getJson('timeout 8 tailscale status --json 2>/dev/null || echo "{}"', {});
   $('backend').textContent = status.BackendState || '-';
-  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || (await exec('tailscale ip -4 2>/dev/null || true')).trim() || '-';
+  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || (await exec('timeout 5 tailscale ip -4 2>/dev/null || true')).trim() || '-';
   const peers = status.Peer ? Object.values(status.Peer) as Peer[] : [];
   $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} online / ${peers.length} total` : '-';
   const cfg: any = await getJson(`sh ${HELPER} get 2>/dev/null || echo "{}"`, {});
@@ -129,10 +148,16 @@ async function refresh() {
 }
 async function saveConfig() {
   buildArgsFromUi();
+  const loginServer = normalizeLoginServer(input('loginServer').value);
+  if (input('loginServer').value.trim() && !loginServer) {
+    setOutput('Invalid control server URL. Use a hostname or an http(s) URL, for example https://headscale.example.com');
+    return false;
+  }
+  input('loginServer').value = loginServer;
   const pairs: [string,string][] = [
     ['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'],
     ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'],
-    ['TS_LOGIN_SERVER', input('loginServer').value.trim()],
+    ['TS_LOGIN_SERVER', loginServer],
     ['TS_HOSTNAME', input('hostname').value],
     ['TS_UP_ARGS', input('upArgs').value],
     ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value],
@@ -142,11 +167,14 @@ async function saveConfig() {
   setDirty(false);
   setOutput('Config saved. Use Apply / Up to apply tailscale up args, or Restart Daemon for daemon args.');
   await refresh();
+  return true;
 }
 function init() {
   $('refresh').addEventListener('click', refresh);
-  $('login').addEventListener('click', () => run(`sh ${HELPER} login`));
-  $('up').addEventListener('click', async () => { await saveConfig(); await run(`sh ${HELPER} up`); });
+  $('login').addEventListener('click', () => runQuick(`sh ${HELPER} login-bg`, 'Starting login in the background. Watch Recent service log for the login URL/progress.'));
+  $('up').addEventListener('click', async () => {
+    if (await saveConfig()) await runQuick(`sh ${HELPER} up-bg`, 'Starting Apply / Up in the background. Watch Recent service log for login URLs/progress.');
+  });
   $('down').addEventListener('click', () => run(`sh ${HELPER} down`));
   $('restart').addEventListener('click', () => run(`sh ${HELPER} restart`));
   $('save').addEventListener('click', saveConfig);
