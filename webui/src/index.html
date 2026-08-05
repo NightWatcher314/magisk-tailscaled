@@ -1,69 +1,78 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#08111f">
   <title>Magisk Tailscaled</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="container">
-    <header>
-      <h1>Magisk Tailscaled</h1>
-      <button id="refresh" class="ghost">Refresh</button>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ROOT NETWORK CONTROL</p>
+        <h1>Magisk Tailscaled</h1>
+        <p id="updated" class="muted">正在读取状态…</p>
+      </div>
+      <button id="refresh" class="icon-btn" aria-label="刷新状态">↻</button>
     </header>
 
-    <section class="grid">
-      <article class="card"><span>Daemon</span><strong id="daemon">Loading</strong></article>
-      <article class="card"><span>Backend</span><strong id="backend">-</strong></article>
-      <article class="card"><span>Tailscale IP</span><strong id="ip">-</strong></article>
-      <article class="card"><span>Peers</span><strong id="peers">-</strong></article>
-    </section>
-
-    <section class="panel">
-      <h2>Actions</h2>
-      <div class="button-group">
-        <button id="login" class="btn">Login</button>
-        <button id="up" class="btn primary">Apply / Up</button>
-        <button id="down" class="btn warning">Down</button>
-        <button id="restart" class="btn secondary">Restart Daemon</button>
+    <section class="status-hero" aria-live="polite">
+      <div class="status-row"><span id="statusDot" class="status-dot pending"></span><strong id="statusLabel">正在连接</strong><span id="statusDetail" class="muted">等待 daemon</span></div>
+      <div class="hero-grid">
+        <div><span>设备 IP</span><strong id="ip">-</strong></div>
+        <div><span>Peers</span><strong id="peers">-</strong></div>
+        <div><span>Relay</span><strong id="relay">-</strong></div>
       </div>
-      <div id="output" class="output">Ready.</div>
     </section>
 
-    <section class="panel">
-      <h2>Common tailscale up options</h2>
+    <section class="action-panel">
+      <div class="section-heading"><h2>快速操作</h2><span id="operation" class="operation" aria-live="polite"></span></div>
+      <div class="action-grid">
+        <button id="login" class="btn secondary">登录</button>
+        <button id="up" class="btn primary">应用并连接</button>
+        <button id="down" class="btn warning">断开</button>
+        <button id="restart" class="btn ghost">重启 daemon</button>
+      </div>
+      <div id="output" class="output" role="status">就绪。</div>
+    </section>
+
+    <details class="panel" open>
+      <summary>常用网络选项</summary>
       <div class="checks">
-        <label><input id="acceptDns" type="checkbox"> Disable Tailscale DNS (<code>--accept-dns=false</code>)</label>
-        <label><input id="acceptRoutes" type="checkbox"> Accept subnet routes (<code>--accept-routes=true</code>)</label>
-        <label><input id="tailscaleSsh" type="checkbox"> Advertise Tailscale SSH (<code>--ssh</code>)</label>
-        <label><input id="advertiseExitNode" type="checkbox"> Advertise this phone as an exit node</label>
-        <label><input id="allowLan" type="checkbox"> Allow LAN access when using an exit node</label>
-        <label><input id="shieldsUp" type="checkbox"> Shields-up mode</label>
+        <label class="switch-row"><span>禁用 Tailscale DNS<small>Android 通常更兼容</small></span><input id="acceptDns" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>接受子网路由</span><input id="acceptRoutes" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>启用 Tailscale SSH</span><input id="tailscaleSsh" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>将本机作为出口节点</span><input id="advertiseExitNode" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>出口节点允许局域网</span><input id="allowLan" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>Shields-up</span><input id="shieldsUp" type="checkbox"><i></i></label>
       </div>
-      <label>Use exit node
-        <select id="exitNode"><option value="">None / clear exit node</option></select>
-      </label>
-      <p class="hint">Exit-node choices are loaded from peers that advertise <code>ExitNodeOption</code>. Save config, then Apply / Up.</p>
+      <label>使用出口节点<select id="exitNode"><option value="">不使用 / 清除</option></select></label>
+      <p class="hint">出口节点来自当前 tailnet 中声明了 ExitNodeOption 的设备。</p>
+    </details>
+
+    <details class="panel">
+      <summary>设备与启动</summary>
+      <label class="switch-row"><span>开机自动启动</span><input id="startOnBoot" type="checkbox"><i></i></label>
+      <label>Control server URL<input id="loginServer" type="url" inputmode="url" placeholder="https://headscale.example.com"></label>
+      <label>设备名称<input id="hostname" placeholder="可选"></label>
+    </details>
+
+    <details class="panel">
+      <summary>高级参数</summary>
+      <label>生成的 tailscale up 参数<input id="upArgs" readonly></label>
+      <label>额外 up 参数<input id="extraUpArgs" placeholder="例如 --advertise-tags=tag:phone"></label>
+      <label>tailscaled daemon 参数<input id="daemonArgs" placeholder="-no-logs-no-support"></label>
+      <p class="warning-text">高级参数仅允许安全 token；不要粘贴命令、分号或 shell 表达式。</p>
+    </details>
+
+    <section class="panel log-panel">
+      <div class="section-heading"><h2>最近日志</h2><button id="clearOutput" class="text-btn">清空输出</button></div>
+      <pre id="log" class="output small">正在读取…</pre>
     </section>
 
-    <section class="panel">
-      <h2>Advanced configuration</h2>
-      <label><input id="startOnBoot" type="checkbox"> Start tailscaled on boot</label>
-      <label>Control server URL <input id="loginServer" type="url" inputmode="url" placeholder="https://headscale.example.com"></label>
-      <label>Hostname <input id="hostname" placeholder="optional"></label>
-      <label>Generated tailscale up args <input id="upArgs" readonly placeholder="--accept-dns=false"></label>
-      <label>Extra up args <input id="extraUpArgs" placeholder="advanced args, e.g. --advertise-tags=tag:phone"></label>
-      <label>tailscaled daemon args <input id="daemonArgs" placeholder="-no-logs-no-support"></label>
-      <div class="button-group"><button id="save" class="btn primary">Save config</button></div>
-      <p id="dirty" class="hint">Saved.</p>
-      <p class="hint">Config is stored at <code>/data/adb/tailscale/config.env</code>. The WebUI calls the helper by absolute path so it works even when KernelSU does not inherit module PATH.</p>
-    </section>
-
-    <section class="panel">
-      <h2>Recent service log</h2>
-      <pre id="log" class="output small">Loading...</pre>
-    </section>
+    <div class="sticky-save"><span id="dirty" class="hint">已保存</span><button id="save" class="btn primary">保存配置</button></div>
   </main>
   <script type="module" src="app.ts"></script>
 </body>

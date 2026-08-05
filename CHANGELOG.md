@@ -64,3 +64,13 @@ This is a complete rewrite of the module with significant improvements.
 
 ### Breaking Changes
 This is a major version update. Please backup your configuration before upgrading.
+## v2.2.0.0
+
+- Refresh WebUI less often, prevent overlapping refreshes, pause while hidden,
+  and add explicit loading/success/error feedback for actions.
+- Replace the form layout with a mobile-first status dashboard, sticky save
+  bar, accessible switches, safe-area support, focus states, and reduced-motion
+  support.
+- Batch configuration writes, report save failures, separate daemon/backend
+  status, and reject shell metacharacters in advanced arguments.
+- Upgrade the bundled Android CLI assets to v1.98.8-android.

@@ -11,6 +11,9 @@ module can be useful when you need Tailscale while another Android VPN is active
 This is still an advanced/root setup, not a drop-in replacement for the official
 app.
 
+Detailed WebUI configuration keys, persistence rules, and runtime boundaries are
+documented in [docs/webui-and-runtime.md](docs/webui-and-runtime.md).
+
 ## Install
 
 1. Download either release asset:

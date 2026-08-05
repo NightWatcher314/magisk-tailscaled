@@ -1,185 +1,110 @@
 export {};
 declare global { interface Window { Android?: { exec(command: string): string; isModuleInstalled(): boolean } } }
-
 type ExecResult = { stdout: string; stderr?: string; errno?: number };
 type Peer = { HostName?: string; DNSName?: string; TailscaleIPs?: string[]; ExitNodeOption?: boolean; Online?: boolean };
+type Status = { BackendState?: string; Self?: { TailscaleIPs?: string[]; Relay?: string }; Peer?: Record<string, Peer> };
 const HELPER = '/data/adb/tailscale/scripts/tailscaled.config';
 const isAndroidApp = typeof window.Android !== 'undefined';
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-let configDirty = false;
 const input = (id: string) => $(id) as HTMLInputElement;
 const select = (id: string) => $(id) as HTMLSelectElement;
+let configDirty = false;
+let refreshInFlight: Promise<void> | null = null;
 
-async function exec(command: string): Promise<string> {
-  if (isAndroidApp && window.Android) return window.Android.exec(command);
-  try {
-    const mod = await import('kernelsu');
-    const result = await mod.exec(command) as ExecResult;
-    return [result.stdout, result.stderr].filter(Boolean).join('\n');
-  } catch (e) {
-    return `ERROR: KernelSU WebUI API is not available (${String(e)})`;
-  }
-}
 const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-async function getJson<T>(cmd: string, fallback: T): Promise<T> { try { return JSON.parse(await exec(cmd)); } catch { return fallback; } }
-function normalizeLoginServer(value: string) {
-  let url = value.trim().replace(/\/+$/, '');
-  if (!url) return '';
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+async function exec(command: string, timeoutSeconds = 10): Promise<string> {
+  const wrapped = `timeout ${timeoutSeconds} sh -c ${shq(command)}`;
   try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
-    return parsed.toString().replace(/\/+$/, '');
-  } catch {
-    return '';
-  }
+    if (isAndroidApp && window.Android) return window.Android.exec(wrapped);
+    const mod = await import('kernelsu');
+    const result = await mod.exec(wrapped) as ExecResult;
+    const out = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    return result.errno ? `${out}\n[exit ${result.errno}]`.trim() : out;
+  } catch (e) { return `ERROR: WebUI shell API unavailable (${String(e)})`; }
 }
-function setDirty(dirty = true) {
-  configDirty = dirty;
-  const el = document.getElementById('dirty');
-  if (el) el.textContent = dirty ? 'Unsaved changes - tap Save config or Apply / Up.' : 'Saved.';
-}
-function setOutput(text: string) {
-  const el = $('output');
-  const escaped = (text || 'OK').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]!));
-  el.innerHTML = escaped.replace(/https?:\/\/[^\s<]+/g, url => `<a href="${url}" target="_blank" rel="noreferrer">${url}</a>`).replace(/\n/g, '<br>');
-}
-const run = async (cmd: string) => { const out = await exec(cmd); setOutput(out); await refresh(); return out; };
-const runQuick = async (cmd: string, message: string) => {
-  setOutput(message);
-  const out = await exec(cmd);
-  setOutput(out);
-  await refresh();
-  return out;
-};
-
+async function getJson<T>(cmd: string, fallback: T): Promise<T> { try { return JSON.parse(await exec(cmd)); } catch { return fallback; } }
 function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
 function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
-function getArgValue(args: string[], flag: string) {
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg === flag) return args[i + 1] || '';
-    if (arg.startsWith(`${flag}=`)) return arg.slice(flag.length + 1);
-  }
-  return '';
-}
 function removeArgs(args: string[], prefixes: string[], consumeValueFor: string[] = []) {
   const kept: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const matched = prefixes.find(p => args[i] === p || args[i].startsWith(`${p}=`));
-    if (!matched) {
-      kept.push(args[i]);
-      continue;
-    }
+    if (!matched) { kept.push(args[i]); continue; }
     if (consumeValueFor.includes(matched) && args[i] === matched && args[i + 1] && !args[i + 1].startsWith('-')) i += 1;
   }
   return kept;
 }
+function setDirty(dirty = true) { configDirty = dirty; $('dirty').textContent = dirty ? '有未保存修改' : '已保存'; $('dirty').classList.toggle('dirty', dirty); }
+function setOutput(text: string) {
+  const el = $('output'); el.replaceChildren();
+  const value = text || 'OK';
+  const urlPattern = /(https?:\/\/[^\s<]+)/g; let last = 0; let match: RegExpExecArray | null;
+  while ((match = urlPattern.exec(value))) {
+    el.append(document.createTextNode(value.slice(last, match.index)));
+    const url = match[1].replace(/[),.;]+$/, '');
+    try { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('scheme'); const a = document.createElement('a'); a.href = parsed.toString(); a.target = '_blank'; a.rel = 'noreferrer'; a.textContent = url; el.append(a); } catch { el.append(document.createTextNode(url)); }
+    last = match.index + match[1].length;
+  }
+  el.append(document.createTextNode(value.slice(last)));
+}
+function setOperation(text = '', busy = false) { $('operation').textContent = text; document.querySelectorAll<HTMLButtonElement>('.action-grid .btn').forEach(b => { b.disabled = busy; }); $('statusDot').className = `status-dot ${busy ? 'busy' : ''}`; }
+function normalizeLoginServer(value: string) { let url = value.trim().replace(/\/+$/, ''); if (!url) return ''; if (!/^https?:\/\//i.test(url)) url = `https://${url}`; try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString().replace(/\/+$/, '') : ''; } catch { return ''; } }
 function buildArgsFromUi(markDirty = true) {
-  let args: string[] = [];
+  const args: string[] = [];
   if (input('acceptDns').checked) args.push('--accept-dns=false');
   if (input('acceptRoutes').checked) args.push('--accept-routes=true');
   if (input('advertiseExitNode').checked) args.push('--advertise-exit-node');
   if (input('shieldsUp').checked) args.push('--shields-up=true');
   const exitNode = select('exitNode').value;
-  if (exitNode) {
-    args.push(`--exit-node=${exitNode}`);
-    if (input('allowLan').checked) args.push('--exit-node-allow-lan-access=true');
-  }
-  input('upArgs').value = args.join(' ');
-  if (markDirty) setDirty(true);
-  return input('upArgs').value;
+  if (exitNode) { args.push(`--exit-node=${exitNode}`); if (input('allowLan').checked) args.push('--exit-node-allow-lan-access=true'); }
+  if (input('tailscaleSsh').checked) args.push('--ssh');
+  input('allowLan').disabled = !exitNode; input('upArgs').value = args.join(' '); if (markDirty) setDirty(true); return input('upArgs').value;
 }
 function populateArgsUi(upArgs: string) {
   const args = splitArgs(upArgs);
-  input('acceptDns').checked = hasArg(args, '--accept-dns=false') || args.includes('--accept-dns=false');
-  input('acceptRoutes').checked = hasArg(args, '--accept-routes=true') || args.includes('--accept-routes');
-  input('advertiseExitNode').checked = args.includes('--advertise-exit-node');
-  input('allowLan').checked = hasArg(args, '--exit-node-allow-lan-access=true');
-  input('shieldsUp').checked = hasArg(args, '--shields-up=true') || args.includes('--shields-up');
-  const exitArg = args.find(a => a.startsWith('--exit-node='));
-  if (exitArg) select('exitNode').value = exitArg.slice('--exit-node='.length);
+  input('acceptDns').checked = hasArg(args, '--accept-dns=false'); input('acceptRoutes').checked = hasArg(args, '--accept-routes=true'); input('advertiseExitNode').checked = args.includes('--advertise-exit-node'); input('allowLan').checked = hasArg(args, '--exit-node-allow-lan-access=true'); input('shieldsUp').checked = hasArg(args, '--shields-up=true'); input('tailscaleSsh').checked = args.includes('--ssh');
+  const exitArg = args.find(a => a.startsWith('--exit-node=')); if (exitArg) select('exitNode').value = exitArg.slice('--exit-node='.length);
   const known = ['--accept-dns', '--accept-dns=false', '--accept-routes', '--accept-routes=true', '--ssh', '--advertise-exit-node', '--exit-node', '--exit-node-allow-lan-access', '--shields-up', '--login-server'];
-  const leftovers = removeArgs(args, known, ['--exit-node', '--login-server']);
-  if (!input('extraUpArgs').value) input('extraUpArgs').value = leftovers.join(' ');
-  buildArgsFromUi(false);
+  input('extraUpArgs').value = removeArgs(args, known, ['--exit-node', '--login-server']).join(' '); buildArgsFromUi(false);
 }
-function loadExitNodes(status: any, selected?: string) {
-  const old = selected ?? select('exitNode').value;
-  select('exitNode').innerHTML = '<option value="">None / clear exit node</option>';
-  const peers: Peer[] = status.Peer ? Object.values(status.Peer) as Peer[] : [];
-  for (const p of peers.filter(p => p.ExitNodeOption)) {
-    const value = p.TailscaleIPs?.[0] || p.DNSName || p.HostName || '';
-    if (!value) continue;
-    const o = document.createElement('option');
-    o.value = value;
-    o.textContent = `${p.HostName || p.DNSName || value}${p.Online ? '' : ' (offline)'} — ${value}`;
-    select('exitNode').appendChild(o);
-  }
-  select('exitNode').value = old;
+function loadExitNodes(status: Status, selected?: string) { const old = selected ?? select('exitNode').value; select('exitNode').replaceChildren(new Option('不使用 / 清除', '')); const peers = status.Peer ? Object.values(status.Peer) : []; for (const p of peers.filter(p => p.ExitNodeOption)) { const value = p.TailscaleIPs?.[0] || p.DNSName || p.HostName || ''; if (value) select('exitNode').add(new Option(`${p.HostName || p.DNSName || value}${p.Online ? '' : '（离线）'} — ${value}`, value)); } select('exitNode').value = old; input('allowLan').disabled = !select('exitNode').value; }
+function renderStatus(status: Status, daemon: string) {
+  const backend = status.BackendState || '-'; const online = backend === 'Running'; const daemonRunning = daemon.trim() === 'running';
+  $('backend').textContent = backend; $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止'; $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? '等待 backend 就绪' : '服务未运行'; $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
+  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || '-'; const peers = status.Peer ? Object.values(status.Peer) : []; $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} 在线 / ${peers.length} 台` : '-'; $('relay').textContent = status.Self?.Relay || '-';
 }
-
 async function refresh() {
-  const daemonOut = await exec('tailscaled.service status >/dev/null 2>&1 && echo running || echo stopped');
-  $('daemon').textContent = daemonOut.trim();
-  const status: any = await getJson('timeout 8 tailscale status --json 2>/dev/null || echo "{}"', {});
-  $('backend').textContent = status.BackendState || '-';
-  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || (await exec('timeout 5 tailscale ip -4 2>/dev/null || true')).trim() || '-';
-  const peers = status.Peer ? Object.values(status.Peer) as Peer[] : [];
-  $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} online / ${peers.length} total` : '-';
-  const cfg: any = await getJson(`sh ${HELPER} get 2>/dev/null || echo "{}"`, {});
-  if (configDirty) {
-    $('log').textContent = await exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true');
-    return;
-  }
-  const upArgs = String(cfg.upArgs || '');
-  const extraUpArgs = String(cfg.extraUpArgs || '');
-  const exitArg = upArgs.split(/\s+/).find((a: string) => a.startsWith('--exit-node='));
-  const loginServer = cfg.loginServer || getArgValue(splitArgs(`${upArgs} ${extraUpArgs}`), '--login-server');
-  loadExitNodes(status, exitArg ? exitArg.slice('--exit-node='.length) : undefined);
-  input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true';
-  input('tailscaleSsh').checked = cfg.enableSsh === '1' || cfg.enableSsh === 'true' || splitArgs(cfg.upArgs || '').includes('--ssh');
-  input('loginServer').value = loginServer || '';
-  input('hostname').value = cfg.hostname || '';
-  input('extraUpArgs').value = removeArgs(splitArgs(extraUpArgs), ['--login-server'], ['--login-server']).join(' ');
-  input('daemonArgs').value = cfg.daemonArgs || '';
-  populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' '));
-  $('log').textContent = await exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true');
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const [daemon, status, cfg, log, ipFallback] = await Promise.all([
+      exec('tailscaled.service status >/dev/null 2>&1 && echo running || echo stopped', 8),
+      getJson<Status>('tailscale status --json 2>/dev/null || echo "{}"', {}),
+      getJson<any>(`sh ${HELPER} get 2>/dev/null || echo "{}"`, {}),
+      exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true', 5),
+      exec('tailscale ip -4 2>/dev/null || true', 5),
+    ]);
+    if (!status.Self?.TailscaleIPs?.length && ipFallback.trim()) { status.Self = { ...(status.Self || {}), TailscaleIPs: [ipFallback.trim()] }; }
+    renderStatus(status, daemon); loadExitNodes(status, String(cfg.upArgs || '').match(/--exit-node=([^\s]+)/)?.[1]); $('log').textContent = log || '暂无日志'; $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
+    if (!configDirty) { const upArgs = String(cfg.upArgs || ''); const extra = String(cfg.extraUpArgs || ''); input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true'; input('loginServer').value = cfg.loginServer || ''; input('hostname').value = cfg.hostname || ''; input('daemonArgs').value = cfg.daemonArgs || ''; populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' ')); input('extraUpArgs').value = removeArgs(splitArgs(extra), ['--login-server'], ['--login-server']).join(' '); buildArgsFromUi(false); }
+  })().finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 async function saveConfig() {
-  buildArgsFromUi();
-  const loginServer = normalizeLoginServer(input('loginServer').value);
-  if (input('loginServer').value.trim() && !loginServer) {
-    setOutput('Invalid control server URL. Use a hostname or an http(s) URL, for example https://headscale.example.com');
-    return false;
-  }
-  input('loginServer').value = loginServer;
-  const pairs: [string,string][] = [
-    ['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'],
-    ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'],
-    ['TS_LOGIN_SERVER', loginServer],
-    ['TS_HOSTNAME', input('hostname').value],
-    ['TS_UP_ARGS', input('upArgs').value],
-    ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value],
-    ['TS_DAEMON_ARGS', input('daemonArgs').value],
-  ];
-  for (const [key, value] of pairs) await exec(`sh ${HELPER} set ${key} ${shq(value)}`);
-  setDirty(false);
-  setOutput('Config saved. Use Apply / Up to apply tailscale up args, or Restart Daemon for daemon args.');
-  await refresh();
-  return true;
+  buildArgsFromUi(); const loginServer = normalizeLoginServer(input('loginServer').value); if (input('loginServer').value.trim() && !loginServer) { setOutput('Control server URL 无效。'); return false; }
+  const pairs: [string,string][] = [['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'], ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'], ['TS_LOGIN_SERVER', loginServer], ['TS_HOSTNAME', input('hostname').value], ['TS_UP_ARGS', input('upArgs').value], ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value], ['TS_DAEMON_ARGS', input('daemonArgs').value]];
+  const args = pairs.map(([key, value]) => `${key} ${shq(value)}`).join(' '); const out = await exec(`sh ${HELPER} set-many ${args}`, 12); if (/ERROR:|\[exit [1-9]/.test(out)) { setOutput(`保存失败：\n${out}`); return false; }
+  setDirty(false); setOutput('配置已保存。点击“应用并连接”使 up 参数生效。'); await refresh(); return true;
 }
+async function action(id: string, command: string, message: string, background = false) { setOperation(message, true); setOutput(message); const out = await exec(command, background ? 8 : 20); setOutput(out || message); setOperation('', false); await refresh(); if (background) { for (let i = 0; i < 4; i += 1) { await new Promise(resolve => setTimeout(resolve, 2500)); await refresh(); } } return out; }
 function init() {
-  $('refresh').addEventListener('click', refresh);
-  $('login').addEventListener('click', () => runQuick(`sh ${HELPER} login-bg`, 'Starting login in the background. Watch Recent service log for the login URL/progress.'));
-  $('up').addEventListener('click', async () => {
-    if (await saveConfig()) await runQuick(`sh ${HELPER} up-bg`, 'Starting Apply / Up in the background. Watch Recent service log for login URLs/progress.');
-  });
-  $('down').addEventListener('click', () => run(`sh ${HELPER} down`));
-  $('restart').addEventListener('click', () => run(`sh ${HELPER} restart`));
+  $('refresh').addEventListener('click', () => refresh()); $('clearOutput').addEventListener('click', () => { $('output').textContent = '就绪。'; });
+  $('login').addEventListener('click', () => action('login', `sh ${HELPER} login-bg`, '正在启动登录…', true));
+  $('up').addEventListener('click', async () => { if (await saveConfig()) await action('up', `sh ${HELPER} up-bg`, '正在应用配置…', true); });
+  $('down').addEventListener('click', () => action('down', `sh ${HELPER} down`, '正在断开…'));
+  $('restart').addEventListener('click', () => action('restart', `sh ${HELPER} restart`, '正在重启 daemon…'));
   $('save').addEventListener('click', saveConfig);
   ['startOnBoot','acceptDns','acceptRoutes','tailscaleSsh','advertiseExitNode','allowLan','shieldsUp','exitNode'].forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
   ['loginServer','hostname','extraUpArgs','daemonArgs'].forEach(id => $(id).addEventListener('input', () => setDirty(true)));
-  refresh(); setInterval(refresh, 10000);
+  refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 15000); document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

@@ -23,12 +23,15 @@ Supported keys:
 - `TS_EXTRA_UP_ARGS` - extra advanced `tailscale up` arguments.
 
 Use `tailscaled.config set KEY VALUE` or the WebUI instead of editing scripts.
-The helper only accepts known keys and writes shell-quoted values.
+The helper only accepts known keys and writes shell-quoted values. Use
+`set-many` for one transactional write; advanced argument values reject shell
+metacharacters because they are eventually expanded as Android command args.
 
 ## Commands
 
 ```sh
 tailscaled.config get
+tailscaled.config set-many TS_START_ON_BOOT 1 TS_ENABLE_SSH 0 TS_HOSTNAME phone
 tailscaled.config set TS_LOGIN_SERVER 'https://headscale.example.com'
 tailscaled.config set TS_UP_ARGS '--accept-dns=false'
 tailscaled.config up

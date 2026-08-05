@@ -33,7 +33,12 @@ rm -f "$BIN_DIR"/* "$MANIFEST"
 if [ -d webui ] && command -v npm >/dev/null 2>&1; then
   echo "Building KernelSU/APatch WebUI..."
   rm -rf webroot
-  npm --prefix webui ci
+  if [ -x webui/node_modules/.bin/parcel ]; then
+    echo "Using existing WebUI dependencies."
+  elif ! npm --prefix webui ci; then
+    echo "WebUI dependencies unavailable; cannot build." >&2
+    exit 1
+  fi
   npm --prefix webui run build
 fi
 
