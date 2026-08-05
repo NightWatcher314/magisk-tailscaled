@@ -10,6 +10,7 @@ const input = (id: string) => $(id) as HTMLInputElement;
 const select = (id: string) => $(id) as HTMLSelectElement;
 let configDirty = false;
 let refreshInFlight: Promise<void> | null = null;
+let latestLog = '';
 
 const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 async function exec(command: string, timeoutSeconds = 10): Promise<string> {
@@ -22,7 +23,7 @@ async function exec(command: string, timeoutSeconds = 10): Promise<string> {
     return result.errno ? `${out}\n[exit ${result.errno}]`.trim() : out;
   } catch (e) { return `ERROR: WebUI shell API unavailable (${String(e)})`; }
 }
-async function getJson<T>(cmd: string, fallback: T): Promise<T> { try { return JSON.parse(await exec(cmd)); } catch { return fallback; } }
+function parseJson<T>(text: string, fallback: T): T { try { return JSON.parse(text); } catch { return fallback; } }
 function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
 function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
 function removeArgs(args: string[], prefixes: string[], consumeValueFor: string[] = []) {
@@ -48,6 +49,7 @@ function setOutput(text: string) {
   el.append(document.createTextNode(value.slice(last)));
 }
 function setOperation(text = '', busy = false) { $('operation').textContent = text; document.querySelectorAll<HTMLButtonElement>('.action-grid .btn').forEach(b => { b.disabled = busy; }); $('statusDot').className = `status-dot ${busy ? 'busy' : ''}`; }
+function loginUrlFromLog(log: string) { return log.match(/https?:\/\/[^\s<]+/i)?.[0]?.replace(/[),.;]+$/, '') || ''; }
 function normalizeLoginServer(value: string) { let url = value.trim().replace(/\/+$/, ''); if (!url) return ''; if (!/^https?:\/\//i.test(url)) url = `https://${url}`; try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString().replace(/\/+$/, '') : ''; } catch { return ''; } }
 function buildArgsFromUi(markDirty = true) {
   const args: string[] = [];
@@ -73,20 +75,36 @@ function renderStatus(status: Status, daemon: string) {
   $('backend').textContent = backend; $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止'; $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? '等待 backend 就绪' : '服务未运行'; $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
   $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || '-'; const peers = status.Peer ? Object.values(status.Peer) : []; $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} 在线 / ${peers.length} 台` : '-'; $('relay').textContent = status.Self?.Relay || '-';
 }
+function snapshotSection(output: string, marker: string, nextMarker?: string) {
+  const start = output.indexOf(`${marker}\n`); if (start < 0) return '';
+  const valueStart = start + marker.length + 1; const end = nextMarker ? output.indexOf(`\n${nextMarker}\n`, valueStart) : output.length;
+  return output.slice(valueStart, end < 0 ? output.length : end).trim();
+}
 async function refresh() {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
-    const [daemon, status, cfg, log, ipFallback] = await Promise.all([
-      exec('tailscaled.service status >/dev/null 2>&1 && echo running || echo stopped', 8),
-      getJson<Status>('tailscale status --json 2>/dev/null || echo "{}"', {}),
-      getJson<any>(`sh ${HELPER} get 2>/dev/null || echo "{}"`, {}),
-      exec('tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true', 5),
-      exec('tailscale ip -4 2>/dev/null || true', 5),
-    ]);
+    // Android WebUI's bridge is synchronous. One shell round-trip is much
+    // faster and avoids five blocking bridge calls pretending to be parallel.
+    const snapshot = await exec(`
+printf '%s\\n' __TS_DAEMON__; (busybox pgrep -f 'tailscaled ' >/dev/null 2>&1 && echo running || echo stopped)
+printf '%s\\n' __TS_STATUS__; timeout 8 tailscale status --json 2>/dev/null || echo '{}'
+printf '%s\\n' __TS_CONFIG__; sh ${HELPER} get 2>/dev/null || echo '{}'
+printf '%s\\n' __TS_LOG__; tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true
+printf '%s\\n' __TS_IP__; timeout 5 tailscale ip -4 2>/dev/null || true
+printf '%s\\n' __TS_END__`, 20);
+    const daemon = snapshotSection(snapshot, '__TS_DAEMON__', '__TS_STATUS__');
+    const status = parseJson<Status>(snapshotSection(snapshot, '__TS_STATUS__', '__TS_CONFIG__'), {});
+    const cfg = parseJson<any>(snapshotSection(snapshot, '__TS_CONFIG__', '__TS_LOG__'), {});
+    const log = snapshotSection(snapshot, '__TS_LOG__', '__TS_IP__');
+    const ipFallback = snapshotSection(snapshot, '__TS_IP__', '__TS_END__');
     if (!status.Self?.TailscaleIPs?.length && ipFallback.trim()) { status.Self = { ...(status.Self || {}), TailscaleIPs: [ipFallback.trim()] }; }
-    renderStatus(status, daemon); loadExitNodes(status, String(cfg.upArgs || '').match(/--exit-node=([^\s]+)/)?.[1]); $('log').textContent = log || '暂无日志'; $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
+    renderStatus(status, daemon); loadExitNodes(status, String(cfg.upArgs || '').match(/--exit-node=([^\s]+)/)?.[1]); latestLog = log; $('log').textContent = log || '暂无日志'; $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
     if (!configDirty) { const upArgs = String(cfg.upArgs || ''); const extra = String(cfg.extraUpArgs || ''); input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true'; input('loginServer').value = cfg.loginServer || ''; input('hostname').value = cfg.hostname || ''; input('daemonArgs').value = cfg.daemonArgs || ''; populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' ')); input('extraUpArgs').value = removeArgs(splitArgs(extra), ['--login-server'], ['--login-server']).join(' '); buildArgsFromUi(false); }
-  })().finally(() => { refreshInFlight = null; });
+  })().catch(error => {
+    $('updated').textContent = `状态读取失败 ${new Date().toLocaleTimeString()}`;
+    $('statusLabel').textContent = '读取失败'; $('statusDetail').textContent = String(error);
+    $('statusDot').className = 'status-dot error';
+  }).finally(() => { refreshInFlight = null; });
   return refreshInFlight;
 }
 async function saveConfig() {
@@ -95,7 +113,12 @@ async function saveConfig() {
   const args = pairs.map(([key, value]) => `${key} ${shq(value)}`).join(' '); const out = await exec(`sh ${HELPER} set-many ${args}`, 12); if (/ERROR:|\[exit [1-9]/.test(out)) { setOutput(`保存失败：\n${out}`); return false; }
   setDirty(false); setOutput('配置已保存。点击“应用并连接”使 up 参数生效。'); await refresh(); return true;
 }
-async function action(id: string, command: string, message: string, background = false) { setOperation(message, true); setOutput(message); const out = await exec(command, background ? 8 : 20); setOutput(out || message); setOperation('', false); await refresh(); if (background) { for (let i = 0; i < 4; i += 1) { await new Promise(resolve => setTimeout(resolve, 2500)); await refresh(); } } return out; }
+async function action(id: string, command: string, message: string, background = false) {
+  void id; setOperation(message, true); setOutput(message); const out = await exec(command, background ? 8 : 20); setOperation('', false); await refresh();
+  const url = loginUrlFromLog(latestLog); setOutput(url ? `登录 URL：\n${url}\n\n点击链接打开。` : (out || message));
+  if (background) { for (let i = 0; i < 4; i += 1) { await new Promise(resolve => setTimeout(resolve, 2000)); await refresh(); const nextUrl = loginUrlFromLog(latestLog); if (nextUrl) { setOutput(`登录 URL：\n${nextUrl}\n\n点击链接打开。`); break; } } }
+  return out;
+}
 function init() {
   $('refresh').addEventListener('click', () => refresh()); $('clearOutput').addEventListener('click', () => { $('output').textContent = '就绪。'; });
   $('login').addEventListener('click', () => action('login', `sh ${HELPER} login-bg`, '正在启动登录…', true));

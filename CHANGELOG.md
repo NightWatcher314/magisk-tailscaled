@@ -78,3 +78,8 @@ This is a major version update. Please backup your configuration before upgradin
 
 - Fix release packaging so the KernelSU/APatch `webroot/` is included in the
   module ZIP and the WebUI button is visible again.
+## v2.2.0.2
+
+- Fix slow/empty initial status and log refresh by reducing the synchronous
+  Android bridge to one bounded snapshot command.
+- Show the login URL directly in the Quick actions output box when it appears.

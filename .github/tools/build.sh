@@ -40,6 +40,7 @@ if [ -d webui ] && command -v npm >/dev/null 2>&1; then
     exit 1
   fi
   PROJECT_ROOT=$(pwd)
+  rm -rf webui/.parcel-cache
   (cd webui && ./node_modules/.bin/parcel build src/index.html --dist-dir "$PROJECT_ROOT/webroot" --public-url ./ --no-source-maps)
 fi
 
