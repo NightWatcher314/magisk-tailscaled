@@ -39,7 +39,8 @@ if [ -d webui ] && command -v npm >/dev/null 2>&1; then
     echo "WebUI dependencies unavailable; cannot build." >&2
     exit 1
   fi
-  npm --prefix webui run build
+  PROJECT_ROOT=$(pwd)
+  (cd webui && ./node_modules/.bin/parcel build src/index.html --dist-dir "$PROJECT_ROOT/webroot" --public-url ./ --no-source-maps)
 fi
 
 TS_JSON=$(get_latest_release_json "anasfanani/tailscale-android-cli")

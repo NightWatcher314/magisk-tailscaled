@@ -74,3 +74,7 @@ This is a major version update. Please backup your configuration before upgradin
 - Batch configuration writes, report save failures, separate daemon/backend
   status, and reject shell metacharacters in advanced arguments.
 - Upgrade the bundled Android CLI assets to v1.98.8-android.
+## v2.2.0.1
+
+- Fix release packaging so the KernelSU/APatch `webroot/` is included in the
+  module ZIP and the WebUI button is visible again.
