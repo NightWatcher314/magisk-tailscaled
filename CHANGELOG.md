@@ -2,7 +2,7 @@
 
 - Replace brittle marker parsing with a single structured `webui` runtime JSON endpoint.
 - Fix the missing DOM element crash that prevented status, logs, and configuration from loading.
-- Prefer the asynchronous KernelSU API, keep Android bridge compatibility, and disable actions until the first valid snapshot.
+- Prefer KernelSU's non-blocking `spawn` API, keep legacy Android/exec compatibility, and disable actions until the first valid snapshot.
 - Preserve unknown `tailscale up` arguments, legacy login-server values, SSH settings, and unavailable/unsaved exit-node selections.
 - Canonicalize managed flags with explicit off/clear values so UI switches cannot be overridden by stale arguments.
 - Add a fast log-only endpoint, skip status timeouts while stopped, remove the redundant IP command, and show the current login URL without blocking the action area.

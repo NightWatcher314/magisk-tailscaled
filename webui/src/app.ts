@@ -5,6 +5,7 @@ import { buildManagedArgs, getArgValue, getBooleanArg, preserveUnmanagedArgs, sp
 declare global {
   interface Window {
     Android?: { exec(command: string): string; isModuleInstalled(): boolean };
+    ksu?: { spawn?: (...args: unknown[]) => unknown };
   }
 }
 
@@ -56,12 +57,46 @@ let saveInFlight = false;
 let pendingLoginOperationId = '';
 let pendingLoginDeadline = 0;
 
+function execWithSpawn(mod: typeof import('kernelsu'), command: string, timeoutSeconds: number): Promise<ExecResult> {
+  return new Promise((resolve, reject) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('KernelSU spawn returned no exit event.'));
+    }, (timeoutSeconds + 3) * 1000);
+    const finish = (errno: number) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve({ errno, stdout: stdout.join('\n'), stderr: stderr.join('\n') });
+    };
+    const child = mod.spawn('sh', ['-c', shq(command)]);
+    child.stdout.on('data', (data: string) => stdout.push(data));
+    child.stderr.on('data', (data: string) => stderr.push(data));
+    child.on('exit', finish);
+    child.on('error', (error: unknown) => {
+      const exitCode = error && typeof error === 'object' && 'exitCode' in error && typeof error.exitCode === 'number' ? error.exitCode : null;
+      if (exitCode !== null) finish(exitCode);
+      else if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  });
+}
+
 async function exec(command: string, timeoutSeconds = 10): Promise<string> {
   const wrapped = `timeout ${timeoutSeconds} sh -c ${shq(command)}`;
   let moduleError: unknown;
   try {
     const mod = await import('kernelsu');
-    const result = await mod.exec(wrapped) as ExecResult;
+    const result = typeof window.ksu?.spawn === 'function'
+      ? await execWithSpawn(mod, wrapped, timeoutSeconds)
+      : await mod.exec(wrapped) as ExecResult;
     const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
     return result.errno ? `${output}\n[exit ${result.errno}]`.trim() : output;
   } catch (error) { moduleError = error; }

@@ -49,6 +49,10 @@ endpoint used by manual log refresh and login URL polling; it does not wait for
 daemon status. When the daemon is stopped, `webui` skips the bounded status
 command instead of blocking the Android bridge.
 
+On managers that expose KernelSU's `spawn` API, shell work runs through that
+non-blocking bridge so a slow bounded status query does not freeze WebUI taps or
+animations. Older Android/KernelSU bridges remain supported as fallbacks.
+
 Managed WebUI switches write explicit boolean values, and clearing the exit
 node writes `--exit-node=`. This makes turning an option off deterministic while
 preserving unrelated advanced `tailscale up` arguments.
