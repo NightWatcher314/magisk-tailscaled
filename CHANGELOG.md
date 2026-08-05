@@ -1,3 +1,10 @@
+## v2.3.1.0
+
+- Add a zero-extra-probe Peer list using the existing status snapshot: name, Tailscale IPs, OS, online/idle state, exit-node role, and the currently known direct/DERP/peer-relay path.
+- Add an on-demand one-packet test per online Peer to report current latency and route without continuously pinging the tailnet.
+- Add an on-demand Netcheck panel for UDP, IPv4/IPv6, port-mapping, captive-portal, and DERP latency diagnostics.
+- Keep automatic status refresh paused while a diagnostic is running and safely validate Peer IP targets.
+
 ## v2.3.0.0
 
 - Replace brittle marker parsing with a single structured `webui` runtime JSON endpoint.

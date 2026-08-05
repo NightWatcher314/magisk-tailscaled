@@ -1,6 +1,7 @@
 export {};
 
 import { buildManagedArgs, getArgValue, getBooleanArg, preserveUnmanagedArgs, splitArgs } from './up-args';
+import { isVisiblePeer, parsePingResult, peerDisplayName, peerPath } from './peers';
 
 declare global {
   interface Window {
@@ -15,7 +16,15 @@ type Peer = {
   DNSName?: string;
   TailscaleIPs?: string[];
   ExitNodeOption?: boolean;
+  ExitNode?: boolean;
   Online?: boolean;
+  Active?: boolean;
+  OS?: string;
+  CurAddr?: string;
+  Relay?: string;
+  PeerRelay?: string;
+  LastSeen?: string;
+  ShareeNode?: boolean;
 };
 type TailscaleStatus = {
   BackendState?: string;
@@ -54,8 +63,10 @@ let preservedUpArgs: string[] = [];
 let runtimeReady = false;
 let operationBusy = false;
 let saveInFlight = false;
+let diagnosticBusy = false;
 let pendingLoginOperationId = '';
 let pendingLoginDeadline = 0;
+const peerTestResults = new Map<string, string>();
 
 function execWithSpawn(mod: typeof import('kernelsu'), command: string, timeoutSeconds: number): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
@@ -73,6 +84,8 @@ function execWithSpawn(mod: typeof import('kernelsu'), command: string, timeoutS
       window.clearTimeout(timer);
       resolve({ errno, stdout: stdout.join('\n'), stderr: stderr.join('\n') });
     };
+    // KernelSU's native bridge concatenates argv into a shell command, so the
+    // sh -c payload must remain one quoted argument. Data callbacks are lines.
     const child = mod.spawn('sh', ['-c', shq(command)]);
     child.stdout.on('data', (data: string) => stdout.push(data));
     child.stderr.on('data', (data: string) => stderr.push(data));
@@ -106,7 +119,7 @@ async function exec(command: string, timeoutSeconds = 10): Promise<string> {
 
 async function execChecked(command: string, timeoutSeconds = 10): Promise<string> {
   const marker = `__TS_EXIT_${Date.now()}__`;
-  const output = await exec(`{ ${command}; }; code=$?; printf '\\n${marker}%s\\n' "$code"`, timeoutSeconds);
+  const output = await exec(`{ ${command}; } 2>&1; code=$?; printf '\\n${marker}%s\\n' "$code"`, timeoutSeconds);
   const match = output.match(new RegExp(`\\n?${marker}(\\d+)\\s*$`));
   if (!match) throw new Error(output.trim() || 'Command timed out without a result.');
   const body = output.slice(0, match.index).trim();
@@ -182,9 +195,14 @@ function setOperation(text = '', busy = false) {
 
 function updateActionAvailability() {
   document.querySelectorAll<HTMLButtonElement>('.action-grid .btn').forEach(button => {
-    button.disabled = operationBusy || saveInFlight || !runtimeReady;
+    button.disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
   });
-  ($('save') as HTMLButtonElement).disabled = operationBusy || saveInFlight || !runtimeReady;
+  ($('save') as HTMLButtonElement).disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
+  ($('netcheck') as HTMLButtonElement).disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
+  document.querySelectorAll<HTMLButtonElement>('.peer-test').forEach(button => {
+    button.disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady || button.dataset.available !== 'true';
+  });
+  ($('refresh') as HTMLButtonElement).disabled = diagnosticBusy || refreshInFlight !== null;
 }
 
 function normalizeLoginServer(value: string) {
@@ -257,9 +275,123 @@ function renderStatus(snapshot: Snapshot) {
   $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? `Backend: ${backend}` : '服务未运行';
   $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
   $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || snapshot.ip || '-';
-  const peers = status.Peer ? Object.values(status.Peer) : [];
+  const peers = status.Peer ? Object.values(status.Peer).filter(isVisiblePeer) : [];
   $('peers').textContent = peers.length ? `${peers.filter(peer => peer.Online).length} 在线 / ${peers.length} 台` : '-';
   $('relay').textContent = status.Self?.Relay || '-';
+  renderPeers(status);
+}
+
+function formatLastSeen(value?: string) {
+  if (!value) return '';
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time) || time <= 0) return '';
+  const minutes = Math.max(0, Math.round((Date.now() - time) / 60000));
+  if (minutes < 1) return '刚刚';
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} 小时前`;
+  return `${Math.round(hours / 24)} 天前`;
+}
+
+function renderPeers(status: TailscaleStatus) {
+  const peers = status.Peer ? Object.values(status.Peer).filter(isVisiblePeer) : [];
+  peers.sort((left, right) => Number(Boolean(right.Online)) - Number(Boolean(left.Online)) ||
+    Number(Boolean(right.Active)) - Number(Boolean(left.Active)) || peerDisplayName(left).localeCompare(peerDisplayName(right)));
+  $('peerCount').textContent = peers.length ? `${peers.filter(peer => peer.Online).length} 在线 / ${peers.length}` : '暂无 Peer';
+  const cards = peers.map(peer => {
+    const ip = peer.TailscaleIPs?.[0] || '';
+    const path = peerPath(peer);
+    const card = document.createElement('article');
+    card.className = 'peer-card';
+
+    const header = document.createElement('div');
+    header.className = 'peer-header';
+    const identity = document.createElement('div');
+    identity.className = 'peer-identity';
+    const dot = document.createElement('span');
+    dot.className = `peer-dot ${peer.Online ? peer.Active ? 'active' : 'online' : 'offline'}`;
+    const names = document.createElement('div');
+    const name = document.createElement('strong');
+    name.textContent = peerDisplayName(peer);
+    const meta = document.createElement('small');
+    const dnsName = peer.DNSName?.replace(/\.$/, '');
+    const lastSeen = !peer.Online ? formatLastSeen(peer.LastSeen) : '';
+    meta.textContent = [peer.OS, dnsName !== peer.HostName ? dnsName : '', lastSeen].filter(Boolean).join(' · ') || 'Peer';
+    names.append(name, meta);
+    identity.append(dot, names);
+    const test = document.createElement('button');
+    test.className = 'text-btn peer-test';
+    test.textContent = '测试';
+    test.dataset.peerIp = ip;
+    test.dataset.available = String(Boolean(peer.Online && ip));
+    header.append(identity, test);
+
+    const details = document.createElement('div');
+    details.className = 'peer-details';
+    const address = document.createElement('code');
+    address.textContent = peer.TailscaleIPs?.join(', ') || '-';
+    const route = document.createElement('span');
+    route.className = `route-badge ${path.kind}`;
+    route.textContent = path.label;
+    if (peer.ExitNode) route.textContent += ' · 当前出口节点';
+    else if (peer.ExitNodeOption) route.textContent += ' · 可作出口节点';
+    details.append(address, route);
+    card.append(header, details);
+
+    const result = ip ? peerTestResults.get(ip) : '';
+    if (result) {
+      const diagnostic = document.createElement('div');
+      diagnostic.className = 'peer-result';
+      diagnostic.textContent = result;
+      card.append(diagnostic);
+    }
+    return card;
+  });
+  $('peerList').replaceChildren(...cards);
+  updateActionAvailability();
+}
+
+async function runPeerTest(ip: string) {
+  if (!ip || diagnosticBusy || operationBusy || saveInFlight) return;
+  diagnosticBusy = true;
+  peerTestResults.set(ip, '测试中…');
+  if (latestSnapshot) renderPeers(latestSnapshot.status);
+  try {
+    const output = await execChecked(`sh ${HELPER} peer-test ${shq(ip)}`, 12);
+    const result = parsePingResult(output);
+    peerTestResults.set(ip, result ? `${result.latency} · ${result.path}` : output.trim() || '测试完成，无可解析结果');
+    setOutput(result ? `Peer ${ip}：${result.latency}，路径 ${result.path}` : output);
+    setTimeout(() => { void refresh(true); }, 300);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    peerTestResults.set(ip, `失败：${message}`);
+    setOutput(`Peer 测试失败：\n${message}`);
+  } finally {
+    diagnosticBusy = false;
+    if (latestSnapshot) renderPeers(latestSnapshot.status);
+    updateActionAvailability();
+  }
+}
+
+async function runNetcheck() {
+  if (diagnosticBusy || operationBusy || saveInFlight) return;
+  diagnosticBusy = true;
+  updateActionAvailability();
+  const button = $('netcheck') as HTMLButtonElement;
+  button.textContent = '检测中…';
+  $('netcheckOutput').textContent = '正在探测 UDP、IPv4/IPv6、端口映射与 DERP 延迟…';
+  $('netcheckOutput').classList.remove('hidden');
+  try {
+    const output = await execChecked(`sh ${HELPER} netcheck`, 35);
+    $('netcheckOutput').textContent = output || 'Netcheck 完成。';
+    setOutput('Netcheck 已完成，结果显示在 Peer 区域。');
+  } catch (error) {
+    $('netcheckOutput').textContent = `Netcheck 失败：\n${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    diagnosticBusy = false;
+    button.textContent = 'Netcheck';
+    updateActionAvailability();
+  }
 }
 
 function populateConfig(config: RuntimeConfig) {
@@ -312,6 +444,7 @@ async function refreshLog() {
 }
 
 async function refresh(forceFresh = false): Promise<void> {
+  if (diagnosticBusy && !forceFresh) return;
   if (refreshInFlight) {
     const current = refreshInFlight;
     if (!forceFresh) return current;
@@ -349,7 +482,7 @@ async function refresh(forceFresh = false): Promise<void> {
 }
 
 async function saveConfig(refreshAfterSave = true) {
-  if (saveInFlight || operationBusy) return false;
+  if (saveInFlight || operationBusy || diagnosticBusy) return false;
   saveInFlight = true;
   updateActionAvailability();
   const saveButton = $('save') as HTMLButtonElement;
@@ -444,7 +577,7 @@ async function pollLoginUrl(operationId: string) {
 }
 
 async function runAction(command: string, message: string, background = false, captureLoginUrl = false) {
-  if (operationBusy || saveInFlight) return false;
+  if (operationBusy || saveInFlight || diagnosticBusy) return false;
   if (!captureLoginUrl) pendingLoginOperationId = '';
   setOperation(message, true);
   setOutput(message);
@@ -476,6 +609,11 @@ function init() {
   updateActionAvailability();
   $('refresh').addEventListener('click', () => refresh());
   $('refreshLog').addEventListener('click', refreshLog);
+  $('netcheck').addEventListener('click', runNetcheck);
+  $('peerList').addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('.peer-test');
+    if (button?.dataset.peerIp) void runPeerTest(button.dataset.peerIp);
+  });
   $('login').addEventListener('click', () => runAction(`sh ${HELPER} login-bg`, '正在启动登录…', true, true));
   $('up').addEventListener('click', async () => { if (await saveConfig(false)) await runAction(`sh ${HELPER} up-bg`, '正在应用配置…', true); });
   $('down').addEventListener('click', () => runAction(`sh ${HELPER} down`, '正在断开…'));

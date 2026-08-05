@@ -33,6 +33,8 @@ metacharacters because they are eventually expanded as Android command args.
 tailscaled.config get
 tailscaled.config webui
 tailscaled.config webui-log
+tailscaled.config peer-test 100.64.0.9
+tailscaled.config netcheck
 tailscaled.config set-many TS_START_ON_BOOT 1 TS_ENABLE_SSH 0 TS_HOSTNAME phone
 tailscaled.config set TS_LOGIN_SERVER 'https://headscale.example.com'
 tailscaled.config set TS_UP_ARGS '--accept-dns=false'
@@ -56,6 +58,13 @@ animations. Older Android/KernelSU bridges remain supported as fallbacks.
 Managed WebUI switches write explicit boolean values, and clearing the exit
 node writes `--exit-node=`. This makes turning an option off deterministic while
 preserving unrelated advanced `tailscale up` arguments.
+
+The Peer list reuses fields already returned by `tailscale status --json`, so
+showing names, IPs, online state, and the currently known direct/DERP/peer-relay
+path adds no extra network probe. Latency is intentionally on demand:
+`peer-test` sends one Tailscale-layer ping to the selected IP. `netcheck` is also
+manual because it performs broader UDP, address-family, port-mapping, and DERP
+latency probes.
 
 ## Binary downloads
 

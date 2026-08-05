@@ -25,6 +25,8 @@ case "$1" in
   status) echo '{"BackendState":"NeedsLogin","Self":{"TailscaleIPs":["100.64.0.1"]}}' ;;
   ip) echo '100.64.0.1' ;;
   login) echo 'https://login.example.test/device' ;;
+  ping) echo 'pong from peer (100.64.0.9) via DERP(hkg) in 21ms' ;;
+  netcheck) printf '\nReport:\n\t* UDP: true\n\t* Nearest DERP: Hong Kong\n' ;;
   *) exit 0 ;;
 esac
 SH
@@ -50,6 +52,12 @@ sleep 1
 grep -F "=== OPERATION $operation_id login ===" "$TMP/run/runs.log" >/dev/null
 grep -F 'https://login.example.test/device' "$TMP/run/runs.log" >/dev/null
 grep -F "=== OPERATION $operation_id END exit=0 ===" "$TMP/run/runs.log" >/dev/null
+sh "$HELPER" peer-test 100.64.0.9 | grep -F 'via DERP(hkg) in 21ms' >/dev/null
+sh "$HELPER" netcheck | grep -F 'UDP: true' >/dev/null
+if sh "$HELPER" peer-test '100.64.0.9;id' >/dev/null 2>&1; then
+  echo 'unsafe peer target was accepted' >&2
+  exit 1
+fi
 if sh "$HELPER" set TS_EXTRA_UP_ARGS 'x;id' >/dev/null 2>&1; then
   echo 'unsafe argument was accepted' >&2
   exit 1

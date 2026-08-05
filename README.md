@@ -37,7 +37,10 @@ su -c 'tailscale set --accept-dns=false'
 
 KernelSU/APatch users can open the module WebUI to:
 
-- View daemon/backend status, Tailscale IPs, peer counts, and recent logs.
+- View daemon/backend status, recent logs, and Peer names, IPs, online state,
+  exit-node role, and currently known direct/DERP/peer-relay paths.
+- Run a single on-demand Peer latency/path test or a full on-demand Netcheck;
+  neither diagnostic runs continuously in the background.
 - Run login, up/apply, down, and daemon restart.
 - Configure boot autostart, control server URL for Headscale, hostname,
   Tailscale SSH, common `tailscale up` checkboxes, exit-node selection, extra

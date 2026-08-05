@@ -38,6 +38,15 @@
       <div id="output" class="output" role="status">就绪。</div>
     </section>
 
+    <section class="panel peer-panel">
+      <div class="section-heading">
+        <div><h2>Peers</h2><span id="peerCount" class="muted">正在读取…</span></div>
+        <button id="netcheck" class="text-btn">Netcheck</button>
+      </div>
+      <div id="peerList" class="peer-list"><p class="hint">正在读取 Peer 状态…</p></div>
+      <pre id="netcheckOutput" class="output small hidden" aria-live="polite"></pre>
+    </section>
+
     <details class="panel" open>
       <summary>常用网络选项</summary>
       <div class="checks">
