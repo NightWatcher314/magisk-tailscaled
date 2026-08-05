@@ -5,9 +5,15 @@ VERSION="${1:-$(grep '^version=' module.prop | cut -d'=' -f2)}"
 DIST_DIR="dist"
 BIN_DIR="tailscale/bin"
 MANIFEST="tailscale/binary-manifest.sh"
+TAILSCALE_RELEASE_TAG="${TAILSCALE_RELEASE_TAG:-v1.98.8-android}"
+JQ_RELEASE_TAG="${JQ_RELEASE_TAG:-v1.6}"
+TAILSCALE_ARM_SHA256="${TAILSCALE_ARM_SHA256:-e5be9d356cb9af43d476a683100562530c64625c93ea775deef08bcc5c0b7fed}"
+TAILSCALE_ARM64_SHA256="${TAILSCALE_ARM64_SHA256:-0e1545aa19b6c89a4601c9eab1f1a15a0b80be99994c569f72482f2964632198}"
+JQ_ARM_SHA256="${JQ_ARM_SHA256:-f885443795bb6968e9641ec2876e9a86847ba82bdee7fd123c7d32545d474b86}"
+JQ_ARM64_SHA256="${JQ_ARM64_SHA256:-100d88b043eb9286eb71f1a28fd3f7f92adca98f78796af82a738c930e57f87b}"
 
-get_latest_release_json() { curl -fsSL "https://api.github.com/repos/$1/releases/latest"; }
-asset_url() { jq -r --arg pattern "$1" '.assets[] | select(.name | test($pattern)) | .browser_download_url' | head -1; }
+download() { local url="$1"; shift; curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 180 "$url" "$@"; }
+get_release_json() { download "https://api.github.com/repos/$1/releases/tags/$2"; }
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 zip_dir() {
   local out="$1"; shift
@@ -30,22 +36,35 @@ echo "Building Magisk-Tailscaled ${VERSION}"
 mkdir -p "$BIN_DIR" "$DIST_DIR"
 rm -f "$BIN_DIR"/* "$MANIFEST"
 
-if [ -d webui ] && command -v npm >/dev/null 2>&1; then
-  echo "Building KernelSU/APatch WebUI..."
-  rm -rf webroot
-  if [ -x webui/node_modules/.bin/parcel ]; then
-    echo "Using existing WebUI dependencies."
-  elif ! npm --prefix webui ci; then
-    echo "WebUI dependencies unavailable; cannot build." >&2
-    exit 1
-  fi
-  PROJECT_ROOT=$(pwd)
-  rm -rf webui/.parcel-cache
-  (cd webui && ./node_modules/.bin/parcel build src/index.html --dist-dir "$PROJECT_ROOT/webroot" --public-url ./ --no-source-maps)
-fi
+command -v npm >/dev/null 2>&1 || { echo "npm is required to build the WebUI" >&2; exit 1; }
+echo "Building KernelSU/APatch WebUI..."
+rm -rf webroot webui/.parcel-cache
+npm --prefix webui ci --registry=https://registry.npmjs.org
+npm --prefix webui run typecheck
+npm --prefix webui run lint
+npm --prefix webui test
+npm --prefix webui audit --audit-level=high --registry=https://registry.npmjs.org
+tests/test-config.sh
+PROJECT_ROOT=$(pwd)
+(cd webui && ./node_modules/.bin/parcel build src/index.html --dist-dir "$PROJECT_ROOT/webroot" --public-url ./ --no-source-maps)
+python3 - <<'PY'
+from html.parser import HTMLParser
+from pathlib import Path
+class Assets(HTMLParser):
+    def __init__(self): super().__init__(); self.paths=[]
+    def handle_starttag(self, _tag, attrs):
+        for key, value in attrs:
+            if key in {'src','href'} and value and not value.startswith(('http:','https:','#')):
+                self.paths.append(value)
+root=Path('webroot'); index=root/'index.html'
+assert index.is_file(), 'missing webroot/index.html'
+parser=Assets(); parser.feed(index.read_text())
+missing=[path for path in parser.paths if not (root/path).is_file()]
+assert not missing, f'missing WebUI assets: {missing}'
+PY
 
-TS_JSON=$(get_latest_release_json "anasfanani/tailscale-android-cli")
-JQ_JSON=$(get_latest_release_json "theshoqanebi/jq-build-for-android")
+TS_JSON=$(get_release_json "anasfanani/tailscale-android-cli" "$TAILSCALE_RELEASE_TAG")
+JQ_JSON=$(get_release_json "theshoqanebi/jq-build-for-android" "$JQ_RELEASE_TAG")
 TS_TAG=$(jq -r .tag_name <<<"$TS_JSON")
 JQ_TAG=$(jq -r .tag_name <<<"$JQ_JSON")
 {
@@ -61,12 +80,18 @@ for ARCH in arm arm64; do
   JQ_URL=$(jq -r --arg pattern "jq-${F_ARCH}-linux-android" '.assets[] | select(.name | test($pattern)) | .browser_download_url' <<<"$JQ_JSON" | head -1)
   [ -n "$TS_URL" ] && [ "$TS_URL" != null ] || { echo "missing tailscale asset for $ARCH" >&2; exit 1; }
   [ -n "$JQ_URL" ] && [ "$JQ_URL" != null ] || { echo "missing jq asset for $ARCH" >&2; exit 1; }
-  curl -fsSL "$TS_URL" -o "$DIST_DIR/tailscale-$ARCH.tgz"
-  curl -fsSL "$JQ_URL" -o "$BIN_DIR/jq-$ARCH"
+  download "$TS_URL" -o "$DIST_DIR/tailscale-$ARCH.tgz"
+  download "$JQ_URL" -o "$BIN_DIR/jq-$ARCH"
   tar -xzf "$DIST_DIR/tailscale-$ARCH.tgz" -C "$BIN_DIR" tailscaled
   mv "$BIN_DIR/tailscaled" "$BIN_DIR/tailscaled-$ARCH"
   TS_SHA=$(sha256_file "$DIST_DIR/tailscale-$ARCH.tgz")
   JQ_SHA=$(sha256_file "$BIN_DIR/jq-$ARCH")
+  case $ARCH in
+    arm) EXPECTED_TS_SHA=$TAILSCALE_ARM_SHA256; EXPECTED_JQ_SHA=$JQ_ARM_SHA256 ;;
+    arm64) EXPECTED_TS_SHA=$TAILSCALE_ARM64_SHA256; EXPECTED_JQ_SHA=$JQ_ARM64_SHA256 ;;
+  esac
+  [ "$TS_SHA" = "$EXPECTED_TS_SHA" ] || { echo "tailscale $ARCH checksum mismatch" >&2; exit 1; }
+  [ "$JQ_SHA" = "$EXPECTED_JQ_SHA" ] || { echo "jq $ARCH checksum mismatch" >&2; exit 1; }
   {
     echo "TAILSCALE_${ARCH}_URL='$TS_URL'"
     echo "TAILSCALE_${ARCH}_SHA256='$TS_SHA'"
@@ -80,9 +105,18 @@ LIGHT="${DIST_DIR}/Magisk-Tailscaled-${VERSION}.zip"
 FULL="${DIST_DIR}/Magisk-Tailscaled-${VERSION}-full.zip"
 rm -f "$LIGHT" "$FULL"
 echo "Creating lightweight zip..."
-zip_dir "$LIGHT" '.git*' 'dist/*' '*.zip' '*.md' 'tailscale/bin/*' '.shellcheckrc' 'webui/node_modules/*' 'webui/.parcel-cache/*' 'system/*'
+zip_dir "$LIGHT" '.git*' '.github/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' 'tailscale/bin/*' '.shellcheckrc' 'system/*'
 echo "Creating full zip..."
-zip_dir "$FULL" '.git*' 'dist/*' '*.zip' '*.md' '.shellcheckrc' 'webui/node_modules/*' 'webui/.parcel-cache/*' 'system/*'
+zip_dir "$FULL" '.git*' '.github/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' '.shellcheckrc' 'system/*'
+python3 - "$LIGHT" "$FULL" <<'PY'
+import sys, zipfile
+for archive in sys.argv[1:]:
+    with zipfile.ZipFile(archive) as z:
+        names=set(z.namelist())
+        assert 'webroot/index.html' in names, f'{archive}: missing WebUI index'
+        assert any(n.startswith('webroot/') and n.endswith('.js') for n in names), f'{archive}: missing WebUI JS'
+        assert any(n.startswith('webroot/') and n.endswith('.css') for n in names), f'{archive}: missing WebUI CSS'
+PY
 rm -f "$BIN_DIR"/*
 
 ls -lh "$DIST_DIR"

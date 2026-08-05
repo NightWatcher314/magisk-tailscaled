@@ -1,3 +1,33 @@
+## v2.3.0.0
+
+- Replace brittle marker parsing with a single structured `webui` runtime JSON endpoint.
+- Fix the missing DOM element crash that prevented status, logs, and configuration from loading.
+- Prefer the asynchronous KernelSU API, keep Android bridge compatibility, and disable actions until the first valid snapshot.
+- Preserve unknown `tailscale up` arguments, legacy login-server values, SSH settings, and unavailable/unsaved exit-node selections.
+- Canonicalize managed flags with explicit off/clear values so UI switches cannot be overridden by stale arguments.
+- Add a fast log-only endpoint, skip status timeouts while stopped, remove the redundant IP command, and show the current login URL without blocking the action area.
+- Track background operations by ID and exit marker so stale login URLs and silent background failures are distinguishable.
+- Force a fresh snapshot after mutations to prevent old periodic refreshes from restoring stale configuration.
+- Harden config validation and JSON encoding; remove dynamic `eval` assignment and shell-glob expansion.
+- Upgrade the KernelSU WebUI library to 3.0.2 and clear current npm audit findings.
+- Add DOM, config round-trip, asset, and ZIP-content release gates; pin binary release tags.
+
+## v2.2.0.2
+
+- Fix slow/empty initial status and log refresh by reducing the synchronous Android bridge to one bounded snapshot command.
+- Show the login URL directly in the Quick actions output box when it appears.
+
+## v2.2.0.1
+
+- Fix release packaging so the KernelSU/APatch `webroot/` is included in the module ZIP and the WebUI button is visible again.
+
+## v2.2.0.0
+
+- Refresh WebUI less often, prevent overlapping refreshes, pause while hidden, and add explicit loading/success/error feedback for actions.
+- Replace the form layout with a mobile-first status dashboard, sticky save bar, accessible switches, safe-area support, focus states, and reduced-motion support.
+- Batch configuration writes, report save failures, separate daemon/backend status, and reject shell metacharacters in advanced arguments.
+- Upgrade the bundled Android CLI assets to v1.98.8-android.
+
 ## v2.1.4.0
 
 - e9370e4 Fix WebUI Headscale login hangs
@@ -64,22 +94,3 @@ This is a complete rewrite of the module with significant improvements.
 
 ### Breaking Changes
 This is a major version update. Please backup your configuration before upgrading.
-## v2.2.0.0
-
-- Refresh WebUI less often, prevent overlapping refreshes, pause while hidden,
-  and add explicit loading/success/error feedback for actions.
-- Replace the form layout with a mobile-first status dashboard, sticky save
-  bar, accessible switches, safe-area support, focus states, and reduced-motion
-  support.
-- Batch configuration writes, report save failures, separate daemon/backend
-  status, and reject shell metacharacters in advanced arguments.
-- Upgrade the bundled Android CLI assets to v1.98.8-android.
-## v2.2.0.1
-
-- Fix release packaging so the KernelSU/APatch `webroot/` is included in the
-  module ZIP and the WebUI button is visible again.
-## v2.2.0.2
-
-- Fix slow/empty initial status and log refresh by reducing the synchronous
-  Android bridge to one bounded snapshot command.
-- Show the login URL directly in the Quick actions output box when it appears.

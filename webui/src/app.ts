@@ -1,133 +1,459 @@
 export {};
-declare global { interface Window { Android?: { exec(command: string): string; isModuleInstalled(): boolean } } }
+
+import { buildManagedArgs, getArgValue, getBooleanArg, preserveUnmanagedArgs, splitArgs } from './up-args';
+
+declare global {
+  interface Window {
+    Android?: { exec(command: string): string; isModuleInstalled(): boolean };
+  }
+}
+
 type ExecResult = { stdout: string; stderr?: string; errno?: number };
-type Peer = { HostName?: string; DNSName?: string; TailscaleIPs?: string[]; ExitNodeOption?: boolean; Online?: boolean };
-type Status = { BackendState?: string; Self?: { TailscaleIPs?: string[]; Relay?: string }; Peer?: Record<string, Peer> };
+type Peer = {
+  HostName?: string;
+  DNSName?: string;
+  TailscaleIPs?: string[];
+  ExitNodeOption?: boolean;
+  Online?: boolean;
+};
+type TailscaleStatus = {
+  BackendState?: string;
+  Self?: { TailscaleIPs?: string[]; Relay?: string };
+  Peer?: Record<string, Peer>;
+};
+type RuntimeConfig = {
+  startOnBoot?: string;
+  daemonArgs?: string;
+  upArgs?: string;
+  loginServer?: string;
+  hostname?: string;
+  enableSsh?: string;
+  extraUpArgs?: string;
+};
+type Snapshot = {
+  daemon: string;
+  ip: string;
+  log: string;
+  status: TailscaleStatus;
+  config: RuntimeConfig;
+};
+type LogSnapshot = { log?: string };
+
 const HELPER = '/data/adb/tailscale/scripts/tailscaled.config';
-const isAndroidApp = typeof window.Android !== 'undefined';
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = (id: string) => $(id) as HTMLInputElement;
 const select = (id: string) => $(id) as HTMLSelectElement;
+const shq = (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
 let configDirty = false;
 let refreshInFlight: Promise<void> | null = null;
-let latestLog = '';
+let logRefreshInFlight: Promise<string> | null = null;
+let latestSnapshot: Snapshot | null = null;
+let preservedUpArgs: string[] = [];
+let runtimeReady = false;
+let operationBusy = false;
+let saveInFlight = false;
+let pendingLoginOperationId = '';
+let pendingLoginDeadline = 0;
 
-const shq = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 async function exec(command: string, timeoutSeconds = 10): Promise<string> {
   const wrapped = `timeout ${timeoutSeconds} sh -c ${shq(command)}`;
+  let moduleError: unknown;
   try {
-    if (isAndroidApp && window.Android) return window.Android.exec(wrapped);
     const mod = await import('kernelsu');
     const result = await mod.exec(wrapped) as ExecResult;
-    const out = [result.stdout, result.stderr].filter(Boolean).join('\n');
-    return result.errno ? `${out}\n[exit ${result.errno}]`.trim() : out;
-  } catch (e) { return `ERROR: WebUI shell API unavailable (${String(e)})`; }
+    const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    return result.errno ? `${output}\n[exit ${result.errno}]`.trim() : output;
+  } catch (error) { moduleError = error; }
+  if (window.Android?.exec) return window.Android.exec(wrapped);
+  throw new Error(`WebUI shell API unavailable: ${String(moduleError)}`);
 }
-function parseJson<T>(text: string, fallback: T): T { try { return JSON.parse(text); } catch { return fallback; } }
-function splitArgs(args: string): string[] { return args.trim().split(/\s+/).filter(Boolean); }
-function hasArg(args: string[], prefix: string) { return args.some(a => a === prefix || a.startsWith(`${prefix}=`)); }
+
+async function execChecked(command: string, timeoutSeconds = 10): Promise<string> {
+  const marker = `__TS_EXIT_${Date.now()}__`;
+  const output = await exec(`{ ${command}; }; code=$?; printf '\\n${marker}%s\\n' "$code"`, timeoutSeconds);
+  const match = output.match(new RegExp(`\\n?${marker}(\\d+)\\s*$`));
+  if (!match) throw new Error(output.trim() || 'Command timed out without a result.');
+  const body = output.slice(0, match.index).trim();
+  if (Number(match[1]) !== 0) throw new Error(body || `Command failed with exit ${match[1]}.`);
+  return body;
+}
+
+function parseSnapshot(text: string): Snapshot {
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw new Error(`Invalid runtime response: ${text.slice(0, 160)}`); }
+  if (!value || typeof value !== 'object') throw new Error('Runtime response is empty.');
+  const snapshot = value as Partial<Snapshot>;
+  return {
+    daemon: String(snapshot.daemon || 'stopped'),
+    ip: String(snapshot.ip || ''),
+    log: String(snapshot.log || ''),
+    status: snapshot.status || {},
+    config: snapshot.config || {},
+  };
+}
+
 function removeArgs(args: string[], prefixes: string[], consumeValueFor: string[] = []) {
   const kept: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    const matched = prefixes.find(p => args[i] === p || args[i].startsWith(`${p}=`));
-    if (!matched) { kept.push(args[i]); continue; }
-    if (consumeValueFor.includes(matched) && args[i] === matched && args[i + 1] && !args[i + 1].startsWith('-')) i += 1;
+  for (let index = 0; index < args.length; index += 1) {
+    const matched = prefixes.find(prefix => args[index] === prefix || args[index].startsWith(`${prefix}=`));
+    if (!matched) {
+      kept.push(args[index]);
+      continue;
+    }
+    if (consumeValueFor.includes(matched) && args[index] === matched && args[index + 1] && !args[index + 1].startsWith('-')) index += 1;
   }
   return kept;
 }
-function setDirty(dirty = true) { configDirty = dirty; $('dirty').textContent = dirty ? '有未保存修改' : '已保存'; $('dirty').classList.toggle('dirty', dirty); }
+
+function setDirty(dirty = true) {
+  configDirty = dirty;
+  $('dirty').textContent = dirty ? '有未保存修改' : '已保存';
+  $('dirty').classList.toggle('dirty', dirty);
+}
+
 function setOutput(text: string) {
-  const el = $('output'); el.replaceChildren();
+  const element = $('output');
+  element.replaceChildren();
   const value = text || 'OK';
-  const urlPattern = /(https?:\/\/[^\s<]+)/g; let last = 0; let match: RegExpExecArray | null;
+  const urlPattern = /(https?:\/\/[^\s<]+)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
   while ((match = urlPattern.exec(value))) {
-    el.append(document.createTextNode(value.slice(last, match.index)));
-    const url = match[1].replace(/[),.;]+$/, '');
-    try { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('scheme'); const a = document.createElement('a'); a.href = parsed.toString(); a.target = '_blank'; a.rel = 'noreferrer'; a.textContent = url; el.append(a); } catch { el.append(document.createTextNode(url)); }
-    last = match.index + match[1].length;
+    element.append(document.createTextNode(value.slice(lastIndex, match.index)));
+    const displayUrl = match[1].replace(/[),.;]+$/, '');
+    try {
+      const url = new URL(displayUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported URL scheme');
+      const link = document.createElement('a');
+      link.href = url.toString();
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = displayUrl;
+      element.append(link);
+    } catch {
+      element.append(document.createTextNode(displayUrl));
+    }
+    lastIndex = match.index + match[1].length;
   }
-  el.append(document.createTextNode(value.slice(last)));
+  element.append(document.createTextNode(value.slice(lastIndex)));
 }
-function setOperation(text = '', busy = false) { $('operation').textContent = text; document.querySelectorAll<HTMLButtonElement>('.action-grid .btn').forEach(b => { b.disabled = busy; }); $('statusDot').className = `status-dot ${busy ? 'busy' : ''}`; }
-function loginUrlFromLog(log: string) { return log.match(/https?:\/\/[^\s<]+/i)?.[0]?.replace(/[),.;]+$/, '') || ''; }
-function normalizeLoginServer(value: string) { let url = value.trim().replace(/\/+$/, ''); if (!url) return ''; if (!/^https?:\/\//i.test(url)) url = `https://${url}`; try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString().replace(/\/+$/, '') : ''; } catch { return ''; } }
+
+function setOperation(text = '', busy = false) {
+  operationBusy = busy;
+  $('operation').textContent = text;
+  updateActionAvailability();
+}
+
+function updateActionAvailability() {
+  document.querySelectorAll<HTMLButtonElement>('.action-grid .btn').forEach(button => {
+    button.disabled = operationBusy || saveInFlight || !runtimeReady;
+  });
+  ($('save') as HTMLButtonElement).disabled = operationBusy || saveInFlight || !runtimeReady;
+}
+
+function normalizeLoginServer(value: string) {
+  let url = value.trim().replace(/\/+$/, '');
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  try {
+    const parsed = new URL(url);
+    const plainOrigin = !parsed.username && !parsed.password && !parsed.search && !parsed.hash && parsed.pathname === '/';
+    return ['http:', 'https:'].includes(parsed.protocol) && plainOrigin ? parsed.origin : '';
+  } catch {
+    return '';
+  }
+}
+
 function buildArgsFromUi(markDirty = true) {
-  const args: string[] = [];
-  if (input('acceptDns').checked) args.push('--accept-dns=false');
-  if (input('acceptRoutes').checked) args.push('--accept-routes=true');
-  if (input('advertiseExitNode').checked) args.push('--advertise-exit-node');
-  if (input('shieldsUp').checked) args.push('--shields-up=true');
   const exitNode = select('exitNode').value;
-  if (exitNode) { args.push(`--exit-node=${exitNode}`); if (input('allowLan').checked) args.push('--exit-node-allow-lan-access=true'); }
-  if (input('tailscaleSsh').checked) args.push('--ssh');
-  input('allowLan').disabled = !exitNode; input('upArgs').value = args.join(' '); if (markDirty) setDirty(true); return input('upArgs').value;
+  const args = buildManagedArgs({
+    disableDns: input('acceptDns').checked,
+    acceptRoutes: input('acceptRoutes').checked,
+    advertiseExitNode: input('advertiseExitNode').checked,
+    shieldsUp: input('shieldsUp').checked,
+    exitNode,
+    allowLan: input('allowLan').checked,
+    ssh: input('tailscaleSsh').checked,
+  }, preservedUpArgs);
+  input('allowLan').disabled = !exitNode;
+  input('upArgs').value = args.join(' ');
+  if (markDirty) setDirty(true);
+  return input('upArgs').value;
 }
+
 function populateArgsUi(upArgs: string) {
   const args = splitArgs(upArgs);
-  input('acceptDns').checked = hasArg(args, '--accept-dns=false'); input('acceptRoutes').checked = hasArg(args, '--accept-routes=true'); input('advertiseExitNode').checked = args.includes('--advertise-exit-node'); input('allowLan').checked = hasArg(args, '--exit-node-allow-lan-access=true'); input('shieldsUp').checked = hasArg(args, '--shields-up=true'); input('tailscaleSsh').checked = args.includes('--ssh');
-  const exitArg = args.find(a => a.startsWith('--exit-node=')); if (exitArg) select('exitNode').value = exitArg.slice('--exit-node='.length);
-  const known = ['--accept-dns', '--accept-dns=false', '--accept-routes', '--accept-routes=true', '--ssh', '--advertise-exit-node', '--exit-node', '--exit-node-allow-lan-access', '--shields-up', '--login-server'];
-  input('extraUpArgs').value = removeArgs(args, known, ['--exit-node', '--login-server']).join(' '); buildArgsFromUi(false);
+  input('acceptDns').checked = getBooleanArg(args, '--accept-dns') === false;
+  input('acceptRoutes').checked = getBooleanArg(args, '--accept-routes') === true;
+  input('advertiseExitNode').checked = getBooleanArg(args, '--advertise-exit-node') === true;
+  input('allowLan').checked = getBooleanArg(args, '--exit-node-allow-lan-access') === true;
+  input('shieldsUp').checked = getBooleanArg(args, '--shields-up') === true;
+  input('tailscaleSsh').checked = getBooleanArg(args, '--ssh') === true;
+  const exitNode = getArgValue(args, '--exit-node');
+  if (exitNode) select('exitNode').value = exitNode;
+  preservedUpArgs = preserveUnmanagedArgs(args);
+  buildArgsFromUi(false);
 }
-function loadExitNodes(status: Status, selected?: string) { const old = selected ?? select('exitNode').value; select('exitNode').replaceChildren(new Option('不使用 / 清除', '')); const peers = status.Peer ? Object.values(status.Peer) : []; for (const p of peers.filter(p => p.ExitNodeOption)) { const value = p.TailscaleIPs?.[0] || p.DNSName || p.HostName || ''; if (value) select('exitNode').add(new Option(`${p.HostName || p.DNSName || value}${p.Online ? '' : '（离线）'} — ${value}`, value)); } select('exitNode').value = old; input('allowLan').disabled = !select('exitNode').value; }
-function renderStatus(status: Status, daemon: string) {
-  const backend = status.BackendState || '-'; const online = backend === 'Running'; const daemonRunning = daemon.trim() === 'running';
-  $('backend').textContent = backend; $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止'; $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? '等待 backend 就绪' : '服务未运行'; $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
-  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || '-'; const peers = status.Peer ? Object.values(status.Peer) : []; $('peers').textContent = peers.length ? `${peers.filter(p => p.Online).length} 在线 / ${peers.length} 台` : '-'; $('relay').textContent = status.Self?.Relay || '-';
+
+function loadExitNodes(status: TailscaleStatus, selected?: string) {
+  const current = selected ?? select('exitNode').value;
+  const options = [new Option('不使用 / 清除', '')];
+  const peers = status.Peer ? Object.values(status.Peer) : [];
+  for (const peer of peers.filter(item => item.ExitNodeOption)) {
+    const value = peer.TailscaleIPs?.[0] || peer.DNSName || peer.HostName || '';
+    if (!value) continue;
+    options.push(new Option(`${peer.HostName || peer.DNSName || value}${peer.Online ? '' : '（离线）'} — ${value}`, value));
+  }
+  if (current && !options.some(option => option.value === current)) {
+    options.push(new Option(`${current}（当前配置，暂不可用）`, current));
+  }
+  select('exitNode').replaceChildren(...options);
+  select('exitNode').value = current;
+  input('allowLan').disabled = !select('exitNode').value;
 }
-function snapshotSection(output: string, marker: string, nextMarker?: string) {
-  const start = output.indexOf(`${marker}\n`); if (start < 0) return '';
-  const valueStart = start + marker.length + 1; const end = nextMarker ? output.indexOf(`\n${nextMarker}\n`, valueStart) : output.length;
-  return output.slice(valueStart, end < 0 ? output.length : end).trim();
+
+function renderStatus(snapshot: Snapshot) {
+  const status = snapshot.status;
+  const backend = status.BackendState || '-';
+  const online = backend === 'Running';
+  const daemonRunning = snapshot.daemon === 'running';
+  $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止';
+  $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? `Backend: ${backend}` : '服务未运行';
+  $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
+  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || snapshot.ip || '-';
+  const peers = status.Peer ? Object.values(status.Peer) : [];
+  $('peers').textContent = peers.length ? `${peers.filter(peer => peer.Online).length} 在线 / ${peers.length} 台` : '-';
+  $('relay').textContent = status.Self?.Relay || '-';
 }
-async function refresh() {
-  if (refreshInFlight) return refreshInFlight;
+
+function populateConfig(config: RuntimeConfig) {
+  const upArgs = String(config.upArgs || '');
+  const extraArgs = String(config.extraUpArgs || '');
+  input('startOnBoot').checked = config.startOnBoot === '1' || config.startOnBoot === 'true';
+  input('loginServer').value = config.loginServer || getArgValue(splitArgs(`${upArgs} ${extraArgs}`), '--login-server');
+  input('hostname').value = config.hostname || '';
+  input('daemonArgs').value = config.daemonArgs || '';
+  populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' '));
+  input('tailscaleSsh').checked = config.enableSsh === '1' || config.enableSsh === 'true' || input('tailscaleSsh').checked;
+  input('extraUpArgs').value = removeArgs(splitArgs(extraArgs), ['--login-server'], ['--login-server']).join(' ');
+  buildArgsFromUi(false);
+}
+
+function renderLog(log: string) {
+  $('log').textContent = log || '暂无日志';
+  if (latestSnapshot) latestSnapshot.log = log;
+  return pendingLoginOperationId && Date.now() < pendingLoginDeadline ? showLoginUrl(log, pendingLoginOperationId) : '';
+}
+
+async function fetchRuntimeLog(): Promise<string> {
+  if (logRefreshInFlight) return logRefreshInFlight;
+  const request = execChecked(`sh ${HELPER} webui-log`, 5).then(output => {
+    let value: unknown;
+    try { value = JSON.parse(output); } catch { throw new Error(`Invalid log response: ${output.slice(0, 160)}`); }
+    if (!value || typeof value !== 'object') throw new Error('Log response is empty.');
+    return String((value as LogSnapshot).log || '');
+  });
+  logRefreshInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (logRefreshInFlight === request) logRefreshInFlight = null;
+  }
+}
+
+async function refreshLog() {
+  const button = $('refreshLog') as HTMLButtonElement;
+  button.disabled = true;
+  button.textContent = '刷新中…';
+  try {
+    renderLog(await fetchRuntimeLog());
+  } catch (error) {
+    $('log').textContent = `日志读取失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = '刷新日志';
+  }
+}
+
+async function refresh(forceFresh = false): Promise<void> {
+  if (refreshInFlight) {
+    const current = refreshInFlight;
+    if (!forceFresh) return current;
+    await current;
+  }
+  const refreshButton = $('refresh') as HTMLButtonElement;
+  refreshButton.disabled = true;
+  refreshButton.classList.add('busy');
   refreshInFlight = (async () => {
-    // Android WebUI's bridge is synchronous. One shell round-trip is much
-    // faster and avoids five blocking bridge calls pretending to be parallel.
-    const snapshot = await exec(`
-printf '%s\\n' __TS_DAEMON__; (busybox pgrep -f 'tailscaled ' >/dev/null 2>&1 && echo running || echo stopped)
-printf '%s\\n' __TS_STATUS__; timeout 8 tailscale status --json 2>/dev/null || echo '{}'
-printf '%s\\n' __TS_CONFIG__; sh ${HELPER} get 2>/dev/null || echo '{}'
-printf '%s\\n' __TS_LOG__; tail -n 80 /data/adb/tailscale/run/runs.log 2>/dev/null || true
-printf '%s\\n' __TS_IP__; timeout 5 tailscale ip -4 2>/dev/null || true
-printf '%s\\n' __TS_END__`, 20);
-    const daemon = snapshotSection(snapshot, '__TS_DAEMON__', '__TS_STATUS__');
-    const status = parseJson<Status>(snapshotSection(snapshot, '__TS_STATUS__', '__TS_CONFIG__'), {});
-    const cfg = parseJson<any>(snapshotSection(snapshot, '__TS_CONFIG__', '__TS_LOG__'), {});
-    const log = snapshotSection(snapshot, '__TS_LOG__', '__TS_IP__');
-    const ipFallback = snapshotSection(snapshot, '__TS_IP__', '__TS_END__');
-    if (!status.Self?.TailscaleIPs?.length && ipFallback.trim()) { status.Self = { ...(status.Self || {}), TailscaleIPs: [ipFallback.trim()] }; }
-    renderStatus(status, daemon); loadExitNodes(status, String(cfg.upArgs || '').match(/--exit-node=([^\s]+)/)?.[1]); latestLog = log; $('log').textContent = log || '暂无日志'; $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
-    if (!configDirty) { const upArgs = String(cfg.upArgs || ''); const extra = String(cfg.extraUpArgs || ''); input('startOnBoot').checked = cfg.startOnBoot === '1' || cfg.startOnBoot === 'true'; input('loginServer').value = cfg.loginServer || ''; input('hostname').value = cfg.hostname || ''; input('daemonArgs').value = cfg.daemonArgs || ''; populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' ')); input('extraUpArgs').value = removeArgs(splitArgs(extra), ['--login-server'], ['--login-server']).join(' '); buildArgsFromUi(false); }
+    const output = await execChecked(`sh ${HELPER} webui`, 15);
+    const snapshot = parseSnapshot(output);
+    latestSnapshot = snapshot;
+    renderStatus(snapshot);
+    const selectedExitNode = configDirty ? select('exitNode').value : getArgValue(splitArgs(String(snapshot.config.upArgs || '')), '--exit-node');
+    loadExitNodes(snapshot.status, selectedExitNode);
+    renderLog(snapshot.log);
+    $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
+    if (!configDirty) populateConfig(snapshot.config);
+    runtimeReady = true;
+    updateActionAvailability();
   })().catch(error => {
+    runtimeReady = false;
+    updateActionAvailability();
     $('updated').textContent = `状态读取失败 ${new Date().toLocaleTimeString()}`;
-    $('statusLabel').textContent = '读取失败'; $('statusDetail').textContent = String(error);
+    $('statusLabel').textContent = '读取失败';
+    $('statusDetail').textContent = error instanceof Error ? error.message : String(error);
     $('statusDot').className = 'status-dot error';
-  }).finally(() => { refreshInFlight = null; });
+    $('log').textContent = `读取失败：${error instanceof Error ? error.message : String(error)}`;
+  }).finally(() => {
+    refreshInFlight = null;
+    refreshButton.disabled = false;
+    refreshButton.classList.remove('busy');
+  });
   return refreshInFlight;
 }
-async function saveConfig() {
-  buildArgsFromUi(); const loginServer = normalizeLoginServer(input('loginServer').value); if (input('loginServer').value.trim() && !loginServer) { setOutput('Control server URL 无效。'); return false; }
-  const pairs: [string,string][] = [['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'], ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'], ['TS_LOGIN_SERVER', loginServer], ['TS_HOSTNAME', input('hostname').value], ['TS_UP_ARGS', input('upArgs').value], ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value], ['TS_DAEMON_ARGS', input('daemonArgs').value]];
-  const args = pairs.map(([key, value]) => `${key} ${shq(value)}`).join(' '); const out = await exec(`sh ${HELPER} set-many ${args}`, 12); if (/ERROR:|\[exit [1-9]/.test(out)) { setOutput(`保存失败：\n${out}`); return false; }
-  setDirty(false); setOutput('配置已保存。点击“应用并连接”使 up 参数生效。'); await refresh(); return true;
+
+async function saveConfig(refreshAfterSave = true) {
+  if (saveInFlight || operationBusy) return false;
+  saveInFlight = true;
+  updateActionAvailability();
+  const saveButton = $('save') as HTMLButtonElement;
+  saveButton.textContent = '保存中…';
+  setOutput('正在保存配置…');
+  buildArgsFromUi();
+  const loginServer = normalizeLoginServer(input('loginServer').value);
+  if (input('loginServer').value.trim() && !loginServer) {
+    setOutput('Control server URL 无效。');
+    saveInFlight = false;
+    saveButton.textContent = '保存配置';
+    updateActionAvailability();
+    return false;
+  }
+  const pairs: [string, string][] = [
+    ['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'],
+    ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'],
+    ['TS_LOGIN_SERVER', loginServer],
+    ['TS_HOSTNAME', input('hostname').value],
+    ['TS_UP_ARGS', input('upArgs').value],
+    ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value],
+    ['TS_DAEMON_ARGS', input('daemonArgs').value],
+  ];
+  const args = pairs.map(([key, value]) => `${key} ${shq(value)}`).join(' ');
+  try {
+    await execChecked(`sh ${HELPER} set-many ${args}`, 12);
+    setDirty(false);
+    setOutput('配置已保存。点击“应用并连接”使 up 参数生效。');
+    if (refreshAfterSave) await refresh(true);
+    return true;
+  } catch (error) {
+    setOutput(`保存失败：\n${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  } finally {
+    saveInFlight = false;
+    saveButton.textContent = '保存配置';
+    updateActionAvailability();
+  }
 }
-async function action(id: string, command: string, message: string, background = false) {
-  void id; setOperation(message, true); setOutput(message); const out = await exec(command, background ? 8 : 20); setOperation('', false); await refresh();
-  const url = loginUrlFromLog(latestLog); setOutput(url ? `登录 URL：\n${url}\n\n点击链接打开。` : (out || message));
-  if (background) { for (let i = 0; i < 4; i += 1) { await new Promise(resolve => setTimeout(resolve, 2000)); await refresh(); const nextUrl = loginUrlFromLog(latestLog); if (nextUrl) { setOutput(`登录 URL：\n${nextUrl}\n\n点击链接打开。`); break; } } }
-  return out;
+
+function operationIdFromOutput(output: string) {
+  return output.match(/^OPERATION_ID=(.+)$/m)?.[1]?.trim() || '';
 }
+
+function loginUrlFromLog(log: string, operationId: string) {
+  const marker = operationId ? `=== OPERATION ${operationId} login ===` : '';
+  if (marker && !log.includes(marker)) return '';
+  const relevant = marker ? log.slice(log.lastIndexOf(marker)) : log;
+  const urls = [...relevant.matchAll(/https?:\/\/[^\s<]+/gi)];
+  return urls[urls.length - 1]?.[0]?.replace(/[),.;]+$/, '') || '';
+}
+
+function operationExitFromLog(log: string, operationId: string) {
+  const marker = `=== OPERATION ${operationId} END exit=`;
+  const start = log.lastIndexOf(marker);
+  if (start < 0) return null;
+  const match = log.slice(start + marker.length).match(/^(\d+) ===/);
+  return match ? Number(match[1]) : null;
+}
+
+function showLoginUrl(log: string, operationId: string) {
+  if (!operationId || pendingLoginOperationId !== operationId) return '';
+  const url = loginUrlFromLog(log, operationId);
+  if (!url) return '';
+  pendingLoginOperationId = '';
+  setOutput(`登录 URL：\n${url}\n\n点击链接打开。`);
+  return url;
+}
+
+async function pollLoginUrl(operationId: string) {
+  while (pendingLoginOperationId === operationId && Date.now() < pendingLoginDeadline) {
+    try {
+      const log = await fetchRuntimeLog();
+      if (renderLog(log)) return;
+      const exitCode = operationExitFromLog(log, operationId);
+      if (exitCode !== null) {
+        pendingLoginOperationId = '';
+        setOutput(exitCode === 0
+          ? '登录命令已完成，未返回新 URL；设备可能已经登录。'
+          : `登录命令失败（exit ${exitCode}）。请查看最近日志。`);
+        return;
+      }
+    } catch (error) {
+      $('log').textContent = `日志读取失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  if (pendingLoginOperationId === operationId) {
+    pendingLoginOperationId = '';
+    setOutput('60 秒内未发现登录 URL。请查看最近日志或重试登录。');
+  }
+}
+
+async function runAction(command: string, message: string, background = false, captureLoginUrl = false) {
+  if (operationBusy || saveInFlight) return false;
+  if (!captureLoginUrl) pendingLoginOperationId = '';
+  setOperation(message, true);
+  setOutput(message);
+  try {
+    const output = await execChecked(command, background ? 10 : 25);
+    const operationId = operationIdFromOutput(output);
+    if (captureLoginUrl && operationId) {
+      pendingLoginOperationId = operationId;
+      pendingLoginDeadline = Date.now() + 60000;
+    }
+    if (background) {
+      setOutput(captureLoginUrl ? `${output}\n\n正在等待登录 URL…` : (output || '后台操作已启动。'));
+      if (captureLoginUrl && operationId) void pollLoginUrl(operationId);
+      else setTimeout(() => { void refresh(true); }, 1500);
+    } else {
+      await refresh(true);
+      setOutput(output || '操作已完成。');
+    }
+    return true;
+  } catch (error) {
+    setOutput(`操作失败：\n${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  } finally {
+    setOperation('', false);
+  }
+}
+
 function init() {
-  $('refresh').addEventListener('click', () => refresh()); $('clearOutput').addEventListener('click', () => { $('output').textContent = '就绪。'; });
-  $('login').addEventListener('click', () => action('login', `sh ${HELPER} login-bg`, '正在启动登录…', true));
-  $('up').addEventListener('click', async () => { if (await saveConfig()) await action('up', `sh ${HELPER} up-bg`, '正在应用配置…', true); });
-  $('down').addEventListener('click', () => action('down', `sh ${HELPER} down`, '正在断开…'));
-  $('restart').addEventListener('click', () => action('restart', `sh ${HELPER} restart`, '正在重启 daemon…'));
-  $('save').addEventListener('click', saveConfig);
-  ['startOnBoot','acceptDns','acceptRoutes','tailscaleSsh','advertiseExitNode','allowLan','shieldsUp','exitNode'].forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
-  ['loginServer','hostname','extraUpArgs','daemonArgs'].forEach(id => $(id).addEventListener('input', () => setDirty(true)));
-  refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 15000); document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  updateActionAvailability();
+  $('refresh').addEventListener('click', () => refresh());
+  $('refreshLog').addEventListener('click', refreshLog);
+  $('login').addEventListener('click', () => runAction(`sh ${HELPER} login-bg`, '正在启动登录…', true, true));
+  $('up').addEventListener('click', async () => { if (await saveConfig(false)) await runAction(`sh ${HELPER} up-bg`, '正在应用配置…', true); });
+  $('down').addEventListener('click', () => runAction(`sh ${HELPER} down`, '正在断开…'));
+  $('restart').addEventListener('click', () => runAction(`sh ${HELPER} restart`, '正在重启 daemon…'));
+  $('save').addEventListener('click', () => saveConfig());
+  ['startOnBoot', 'acceptDns', 'acceptRoutes', 'tailscaleSsh', 'advertiseExitNode', 'allowLan', 'shieldsUp', 'exitNode']
+    .forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
+  ['loginServer', 'hostname', 'extraUpArgs', 'daemonArgs']
+    .forEach(id => $(id).addEventListener('input', () => setDirty(true)));
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+else init();

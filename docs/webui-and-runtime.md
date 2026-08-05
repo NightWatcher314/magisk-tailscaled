@@ -31,6 +31,8 @@ metacharacters because they are eventually expanded as Android command args.
 
 ```sh
 tailscaled.config get
+tailscaled.config webui
+tailscaled.config webui-log
 tailscaled.config set-many TS_START_ON_BOOT 1 TS_ENABLE_SSH 0 TS_HOSTNAME phone
 tailscaled.config set TS_LOGIN_SERVER 'https://headscale.example.com'
 tailscaled.config set TS_UP_ARGS '--accept-dns=false'
@@ -39,9 +41,22 @@ tailscaled.config down
 tailscaled.config restart
 ```
 
+`webui` returns one structured JSON snapshot containing daemon/backend status,
+runtime configuration, IP information, and recent logs. Background login/up
+commands emit an operation ID so the WebUI can associate login URLs with the
+current action instead of stale log entries. `webui-log` is a fast log-only
+endpoint used by manual log refresh and login URL polling; it does not wait for
+daemon status. When the daemon is stopped, `webui` skips the bounded status
+command instead of blocking the Android bridge.
+
+Managed WebUI switches write explicit boolean values, and clearing the exit
+node writes `--exit-node=`. This makes turning an option off deterministic while
+preserving unrelated advanced `tailscale up` arguments.
+
 ## Binary downloads
 
-Release builds generate `tailscale/binary-manifest.sh` with exact asset URLs and
+Release builds use fixed Tailscale/jq release tags and generate
+`tailscale/binary-manifest.sh` with exact asset URLs and
 SHA256 hashes for the Tailscale Android CLI and jq binaries. Lightweight installs
 use that manifest and verify the downloaded files before extracting or installing
 them. Full release zips include the binaries directly.
