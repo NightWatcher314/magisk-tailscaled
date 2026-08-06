@@ -48,6 +48,7 @@ tests/test-config.sh
 tests/test-installer.sh
 tests/test-watchdog.sh
 tests/test-logs.sh
+tests/test-kernelsu-shell.sh
 tests/test-version.sh "$VERSION"
 for script in customize.sh service.sh uninstall.sh tailscale/settings.sh tailscale/scripts/*; do
   sh -n "$script"

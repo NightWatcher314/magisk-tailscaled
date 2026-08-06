@@ -1,3 +1,8 @@
+## v2.4.0.3
+
+- Fix false configuration failures under KernelSU Next's `ASH_STANDALONE=1` BusyBox shell by avoiding redirected shell-builtin output in validation and explicitly propagating validation errors.
+- Add a pinned KernelSU Next v3.2.0 BusyBox regression gate covering config validation, migration, hostile input rejection, watchdog, logs, and installer preservation behavior.
+
 ## v2.4.0.2
 
 - Remove the config helper's `realpath` dependency so upgrade preflight works in restricted KernelSU installer environments.
