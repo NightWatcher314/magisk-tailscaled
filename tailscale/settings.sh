@@ -137,4 +137,8 @@ rotate_log() {
   ) || true
 }
 
-[ -n "${DEBUG:-}" ] && set -u && set -x && PS4='+ ${0##*/}:${LINENO}: ' || true
+if [ -n "${DEBUG:-}" ]; then
+  set -u
+  set -x
+  PS4='+ ${0##*/}:${LINENO}: '
+fi

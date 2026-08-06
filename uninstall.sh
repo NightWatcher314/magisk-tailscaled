@@ -7,7 +7,9 @@ if [ -x /data/adb/tailscale/scripts/tailscaled.service ]; then
     /data/adb/tailscale/scripts/tailscaled.service stop >/dev/null 2>&1 || true
 fi
 for PID in $(busybox pidof inotifyd 2>/dev/null); do
-    grep -q "tailscaled.inotify" "/proc/$PID/cmdline" 2>/dev/null && kill "$PID" 2>/dev/null || true
+    if grep -q "tailscaled.inotify" "/proc/$PID/cmdline" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+    fi
 done
 rm -rf /data/adb/tailscale
 SERVICE_DIR="/data/adb/service.d"

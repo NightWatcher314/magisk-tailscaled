@@ -60,7 +60,9 @@ release_start_lock() {
 }
 
 sync_watchdog_service() {
-  [ -x "${TS_SCRIPTS_DIR}/tailscaled.config" ] && "${TS_SCRIPTS_DIR}/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+  if [ -x "${TS_SCRIPTS_DIR}/tailscaled.config" ]; then
+    "${TS_SCRIPTS_DIR}/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+  fi
 }
 
 program(){
@@ -107,14 +109,14 @@ program(){
     fi
     mkdir -p "${logdir}"
     rotate_log "${log_file}" rename
-    if [ ! -z "${pre_up}" ];then $pre_up  2>&1; fi
+    if [ -n "${pre_up}" ];then $pre_up  2>&1; fi
     nohup sh -c "$command 2>&1 | sh '$DIR/tailscaled.logwriter' '$log_file'" >/dev/null 2>&1 &
     wrapper_pid=$!
     sleep 3 # waiting for program really started
     if PID=$(busybox pgrep -x "${program_name}" | busybox head -n 1) && [ -n "$PID" ]; then
       log Info "✔ ${program_name} service success running with PID: ${PID}."
       echo "$PID" > "${pid_file}"
-      if [ ! -z "${post_up}" ];then ${post_up} 2>&1; fi
+      if [ -n "${post_up}" ];then ${post_up} 2>&1; fi
       release_start_lock
       trap - EXIT HUP INT TERM
       return 0
@@ -129,7 +131,7 @@ program(){
   stop(){
     log Info "Stopping ${program_name} service."
     if PID=$(busybox pgrep -x "${program_name}"); then
-      if [ ! -z "${pre_down}" ];then $pre_down  2>&1; fi
+      if [ -n "${pre_down}" ];then $pre_down  2>&1; fi
       # Use `busybox pkill` to kill the binary with signal 15, otherwise use `killall`.
       if busybox pkill -f -15 -e "${command}" >/dev/null 2>&1; then
         : # Do nothing if busybox pkill is successful
@@ -145,7 +147,7 @@ program(){
     if ! busybox pgrep -x "${program_name}" >/dev/null 2>&1; then
       log Info "✘ ${program_name} shutting down, service is stopped."
       log Info "✘ ${program_name} disconnected."
-      if [ ! -z "${post_down}" ];then $post_down  2>&1; fi
+      if [ -n "${post_down}" ];then $post_down  2>&1; fi
       [ -t 1 ] && echo "${yellow}--------------------------------------------${normal}"
       return 0
     else
@@ -165,7 +167,7 @@ program(){
       sleep 2
       if ! busybox pgrep -x "${program_name}" >/dev/null 2>&1; then
         log Info "✔ done, you can sleep peacefully."
-        if [ ! -z "${post_down}" ];then $post_down  2>&1; fi
+        if [ -n "${post_down}" ];then $post_down  2>&1; fi
         [ -t 1 ] && echo "${yellow}--------------------------------------------${normal}"
         return 0
       fi

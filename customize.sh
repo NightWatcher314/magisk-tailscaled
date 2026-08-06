@@ -1,13 +1,13 @@
 #!/system/bin/sh
 
 # DEBUG=1
-[ -n "${DEBUG:-}" ] && {
+if [ -n "${DEBUG:-}" ]; then
 	PS4="+ \${0##*/}:\${LINENO}: "
 	set -e
 	set -u
 	set -x
 	set
-} || true
+fi
 
 # Github download helper
 verify_sha256() {
@@ -161,7 +161,9 @@ rollback_install() {
 		elif [ "$daemon_was_running" -eq 1 ] && [ -x "$TS_DIR/scripts/tailscaled.service" ]; then
 			"$TS_DIR/scripts/tailscaled.service" start >/dev/null 2>&1 || true
 		fi
-		[ -x "$TS_DIR/scripts/tailscaled.config" ] && "$TS_DIR/scripts/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+		if [ -x "$TS_DIR/scripts/tailscaled.config" ]; then
+			"$TS_DIR/scripts/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+		fi
 	fi
 	exit "$code"
 }
@@ -264,4 +266,7 @@ else
 		ui_print "  su -c 'tailscaled.service'"
 	fi
 fi
-[ -n "${DEBUG:-}" ] && { set +ue; } || true
+if [ -n "${DEBUG:-}" ]; then
+	set +u
+	set +e
+fi
