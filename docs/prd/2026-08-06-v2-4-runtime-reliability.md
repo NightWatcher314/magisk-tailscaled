@@ -58,7 +58,8 @@ status: 已完成
 
 - watchdog 默认关闭，避免未经用户选择改变续航和故障行为。
 - 日志默认上限采用保守值，由实现阶段依据现有日志量选择；WebUI 可调整但必须限定合理范围。
-- 真实 KernelSU Next、Magisk、APatch 三端真机自动化不可在当前 CI 完成；本版本提供浏览器 bridge 测试和可执行真机回归清单，并明确未完成的真机覆盖。
+- KernelSU Next 覆盖升级已于 2026-08-07 使用 `v2.4.0.3` 真机验证通过；CI 固定 KernelSU Next v3.2.0 官方 BusyBox，并在 `ASH_STANDALONE=1` 下运行 shell 回归。
+- Magisk、APatch 真机覆盖仍未验证；保留可执行真机回归清单并明确该覆盖缺口。
 
 ## 风险与依赖
 

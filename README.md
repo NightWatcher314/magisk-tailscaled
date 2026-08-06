@@ -105,6 +105,12 @@ su -c tailscaled.config up
 
 ## Troubleshooting
 
+If an upgrade reports `Existing config.env is invalid`, do not uninstall the
+module or delete `/data/adb/tailscale`. Install v2.4.0.3 or newer:
+v2.4.0.0-v2.4.0.2 can falsely reject valid older configs under the KernelSU
+Next installer shell. This preflight failure happens before the live runtime or
+node state is changed.
+
 ```sh
 su -c tailscaled.service restart
 su -c tailscale status

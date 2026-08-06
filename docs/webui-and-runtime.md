@@ -90,6 +90,16 @@ Install stages downloads, SHA256 verification, extraction, and shell syntax
 checks before moving live managed paths. Only `bin/`, `scripts/`, and
 `settings.sh` are switched. Configuration and runtime state stay in place;
 failure during the switch restores the prior managed paths and config copy.
+Canonical seven-key v2.3.1 configs remain valid during upgrade, and missing
+v2.4 fields receive their defaults. The installer parses `config.env` as data;
+it never executes the file.
+
+KernelSU Next runs module installers through its bundled BusyBox `ash` with
+`ASH_STANDALONE=1`. `tests/test-kernelsu-shell.sh` therefore pins the official
+KernelSU Next v3.2.0 x86_64 BusyBox and runs the shell regression suite in that
+mode. Validation paths must propagate failures explicitly and must not depend
+on cross-shell exit-status behavior from redirecting shell functions or
+builtins.
 
 Watchdog is default-off. When enabled it runs only while boot autostart is also
 enabled, the module is active, and no manual-stop marker exists. Restart delays
