@@ -80,8 +80,7 @@ jobs:
           - **Magisk-Tailscaled-${TAG}-full.zip** — complete offline package
           - **SHA256SUMS** — checksums for both packages
           EOF
-          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+          release_id=$(gh release view "$TAG" --json databaseId --jq .databaseId 2>/dev/null || true)
           if [ -n "$release_id" ]; then
             if [ "$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .draft)" = false ]; then
               echo "RELEASE_ID=$release_id" >>"$GITHUB_ENV"
@@ -96,8 +95,12 @@ jobs:
               "dist/Magisk-Tailscaled-${TAG}.zip" \
               "dist/Magisk-Tailscaled-${TAG}-full.zip" \
               dist/SHA256SUMS
-          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+          release_id=
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            release_id=$(gh release view "$TAG" --json databaseId --jq .databaseId 2>/dev/null || true)
+            [ -z "$release_id" ] || break
+            sleep 1
+          done
           test -n "$release_id"
           echo "RELEASE_ID=$release_id" >>"$GITHUB_ENV"
 
