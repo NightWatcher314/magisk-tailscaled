@@ -84,6 +84,7 @@ jobs:
             --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
           if [ -n "$release_id" ]; then
             if [ "$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .draft)" = false ]; then
+              echo "RELEASE_ID=$release_id" >>"$GITHUB_ENV"
               echo RELEASE_ALREADY_PUBLISHED=1 >>"$GITHUB_ENV"
               exit 0
             fi
@@ -95,6 +96,10 @@ jobs:
               "dist/Magisk-Tailscaled-${TAG}.zip" \
               "dist/Magisk-Tailscaled-${TAG}-full.zip" \
               dist/SHA256SUMS
+          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+          test -n "$release_id"
+          echo "RELEASE_ID=$release_id" >>"$GITHUB_ENV"
 
       - name: Download and verify draft assets
         run: |
@@ -104,7 +109,7 @@ jobs:
           (cd release-readback && sha256sum -c SHA256SUMS)
           for file in "Magisk-Tailscaled-${TAG}.zip" "Magisk-Tailscaled-${TAG}-full.zip" SHA256SUMS; do
             local_sha=$(sha256sum "release-readback/$file" | awk '{print $1}')
-            remote_digest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq ".assets[] | select(.name == \"$file\") | .digest")
+            remote_digest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq ".assets[] | select(.name == \"$file\") | .digest")
             test "$remote_digest" = "sha256:$local_sha"
           done
 
