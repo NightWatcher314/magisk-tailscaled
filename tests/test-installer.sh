@@ -13,7 +13,7 @@ mkdir -p "$runtime/bin" "$runtime/scripts" "$runtime/state" "$runtime/run" "$run
 printf old >"$runtime/bin/tailscaled"
 printf old >"$runtime/scripts/tailscaled.config"
 printf old >"$runtime/settings.sh"
-printf "TS_HOSTNAME='phone'\n" >"$runtime/config.env"
+cp "$ROOT/tests/fixtures/config-v2.3.1.env" "$runtime/config.env"
 printf state >"$runtime/tailscaled.state"
 printf runtime >"$runtime/run/runs.log"
 printf key >"$runtime/ssh/key"
@@ -26,7 +26,7 @@ printf new >"$stage/settings.sh"
 backup_runtime_data "$runtime" "$backup"
 [ ! -e "$runtime/bin" ]
 [ ! -e "$runtime/scripts" ]
-grep -F phone "$runtime/config.env" >/dev/null
+grep -F "TS_UP_ARGS='--accept-dns=false --accept-routes=true --advertise-exit-node=false --shields-up=false --exit-node= --ssh=false'" "$runtime/config.env" >/dev/null
 cmp "$runtime/config.env" "$backup/config.env"
 for path in tailscaled.state state run ssh certs; do [ -e "$runtime/$path" ]; done
 
@@ -37,12 +37,13 @@ printf "TS_HOSTNAME='changed'\n" >"$runtime/config.env"
 restore_runtime_data "$runtime" "$backup"
 grep -F old "$runtime/bin/tailscaled" >/dev/null
 grep -F old "$runtime/scripts/tailscaled.config" >/dev/null
-grep -F phone "$runtime/config.env" >/dev/null
+grep -F "TS_UP_ARGS='--accept-dns=false --accept-routes=true --advertise-exit-node=false --shields-up=false --exit-node= --ssh=false'" "$runtime/config.env" >/dev/null
 for path in tailscaled.state state run ssh certs; do [ -e "$runtime/$path" ]; done
 
 ! grep -q 'releases/latest' "$ROOT/customize.sh"
 grep -F 'Missing pinned URL or SHA256' "$ROOT/customize.sh" >/dev/null
 grep -F 'restore_runtime_data "$TS_DIR" "$BACKUP_DIR"' "$ROOT/customize.sh" >/dev/null
+grep -F 'Config validation:' "$ROOT/customize.sh" >/dev/null
 
 malicious_config="$TMP/malicious-config.env"
 executed_marker="$TMP/config-was-executed"

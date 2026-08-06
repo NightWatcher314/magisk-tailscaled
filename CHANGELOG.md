@@ -1,3 +1,8 @@
+## v2.4.0.1
+
+- Restore upgrades from the canonical v2.3.1 seven-key `config.env` by replacing the non-portable comment regex with shell parsing and filling new defaults during migration.
+- Show a safe line-numbered validation reason in the module installer without echoing configuration values; retain rollback behavior for genuinely invalid files.
+
 ## v2.4.0.0
 
 - Preserve and migrate existing runtime configuration during staged upgrades; pinned lightweight downloads now require both URL and SHA256 before live files change.

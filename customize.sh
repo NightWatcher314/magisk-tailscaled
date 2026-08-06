@@ -33,6 +33,19 @@ manifest_lookup() {
 	eval "printf %s \"\${$KEY:-}\""
 }
 
+print_config_validation_error() {
+	ERROR_FILE=$1
+	VALIDATION_REASON=$(sed -n '1p' "$ERROR_FILE" 2>/dev/null | tr -d '\r\n')
+	case "$VALIDATION_REASON" in
+		"Invalid config line "*|TS_START_ON_BOOT*|TS_ENABLE_SSH*|TS_WATCHDOG_ENABLED*|TS_LOG_MAX_KB*|TS_LOGIN_SERVER*|TS_HOSTNAME*|"Unsafe shell characters in argument value"|"Newlines are not allowed in argument values"|"Control characters are not allowed in argument values"|"Shell glob characters are not allowed in argument values")
+			ui_print "! Config validation: $VALIDATION_REASON"
+		;;
+		*)
+			ui_print "! Config validation: parser failed before migration; configuration values were not changed"
+		;;
+	esac
+}
+
 # Github download helper; requires pinned manifest URLs and SHA256.
 gh_download() {
 	MANIFEST_PREFIX=${1:-}
@@ -129,8 +142,12 @@ if [ -d "$TS_DIR" ]; then
 	[ -n "$versionCode" ] || versionCode=unknown
 	if [ -f "$TS_DIR/config.env" ]; then
 		LIVE_CONFIG_FILE="$TS_DIR/config.env"
-		TS_DIR="$TS_DIR" TS_BIN_DIR="$STAGE_BIN_DIR" TS_CONFIG_FILE="$LIVE_CONFIG_FILE" TS_MOD_DIR="$MODPATH" TS_SCRIPTS_DIR="$STAGE_SCRIPTS_DIR" \
-			sh "$STAGE_SCRIPTS_DIR/tailscaled.config" validate >/dev/null 2>&1 || abort "error: Existing config.env is invalid; live installation was not changed"
+		CONFIG_VALIDATION_ERROR="$TMPDIR/config-validation.error"
+		if ! TS_DIR="$TS_DIR" TS_BIN_DIR="$STAGE_BIN_DIR" TS_CONFIG_FILE="$LIVE_CONFIG_FILE" TS_MOD_DIR="$MODPATH" TS_SCRIPTS_DIR="$STAGE_SCRIPTS_DIR" \
+			sh "$STAGE_SCRIPTS_DIR/tailscaled.config" validate >/dev/null 2>"$CONFIG_VALIDATION_ERROR"; then
+			print_config_validation_error "$CONFIG_VALIDATION_ERROR"
+			abort "error: Existing config.env is invalid; live installation was not changed"
+		fi
 	fi
 	ui_print "- Backup old files"
 	# shellcheck source=tailscale/scripts/install.lib.sh
@@ -175,7 +192,11 @@ runtime_switch_started=1
 backup_runtime_data "$TS_DIR" "$BACKUP_DIR"
 install_staged_runtime "$STAGE_TS_DIR" "$TS_DIR" || abort "error: Unable to install staged runtime"
 if [ -f "$TS_DIR/config.env" ]; then
-	sh "$TS_SCRIPTS_DIR/tailscaled.config" migrate >/dev/null 2>&1 || abort "error: Existing config.env is invalid; previous runtime restored"
+	CONFIG_VALIDATION_ERROR="$TMPDIR/config-validation.error"
+	if ! sh "$TS_SCRIPTS_DIR/tailscaled.config" migrate >/dev/null 2>"$CONFIG_VALIDATION_ERROR"; then
+		print_config_validation_error "$CONFIG_VALIDATION_ERROR"
+		abort "error: Existing config.env is invalid; previous runtime restored"
+	fi
 else
 	sh "$TS_SCRIPTS_DIR/tailscaled.config" init 2>/dev/null || abort "error: Unable to initialize config.env"
 fi

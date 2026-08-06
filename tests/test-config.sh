@@ -42,6 +42,68 @@ esac
 SH
 chmod +x "$TMP/bin/busybox" "$TMP/bin/tailscale"
 
+# v2.3.1 wrote this exact seven-key format. v2.4 upgrades must accept it,
+# preserve its values, and add new defaults without executing the file.
+cp "$ROOT/tests/fixtures/config-v2.3.1.env" "$TMP/config.env"
+sh "$HELPER" validate
+sh "$HELPER" migrate
+grep -F "TS_UP_ARGS='--accept-dns=false --accept-routes=true --advertise-exit-node=false --shields-up=false --exit-node= --ssh=false'" "$TMP/config.env" >/dev/null
+grep -F "TS_WATCHDOG_ENABLED='0'" "$TMP/config.env" >/dev/null
+grep -F "TS_LOG_MAX_KB='1024'" "$TMP/config.env" >/dev/null
+
+# Android grep implementations do not all accept GNU-style BRE extensions.
+# Config comments and blank lines must be classified by the shell parser.
+mkdir -p "$TMP/strict-bin"
+cat >"$TMP/strict-bin/grep" <<'SH'
+#!/bin/sh
+case "$*" in
+  *'^[[:space:]]*\(#.*\)\?$'*)
+    echo 'non-portable comment regex used' >&2
+    exit 2
+  ;;
+esac
+exec /usr/bin/grep "$@"
+SH
+chmod +x "$TMP/strict-bin/grep"
+cp "$ROOT/tests/fixtures/config-v2.3.1.env" "$TMP/config.env"
+PATH="$TMP/strict-bin:$PATH" sh "$HELPER" validate
+PATH="$TMP/strict-bin:$PATH" busybox sh "$HELPER" validate
+if command -v mksh >/dev/null 2>&1; then
+  PATH="$TMP/strict-bin:$PATH" mksh "$HELPER" validate
+fi
+
+cat >"$TMP/config.env" <<'EOF'
+# leading whitespace remains valid for comments and blank lines
+  # comment
+
+TS_HOSTNAME='phone'
+EOF
+sh "$HELPER" validate
+
+cat >"$TMP/config.env" <<'EOF'
+TS_HOSTNAME='phone'
+TS_HOSTNAME='duplicate'
+EOF
+if sh "$HELPER" validate >"$TMP/invalid.out" 2>"$TMP/invalid.err"; then
+  echo 'duplicate config key unexpectedly passed validation' >&2
+  exit 1
+fi
+grep -F 'Invalid config line 2: duplicate key TS_HOSTNAME' "$TMP/invalid.err" >/dev/null
+
+cat >"$TMP/config.env" <<'EOF'
+UNSUPPORTED_SECRET_NAME='must-not-be-echoed'
+EOF
+if sh "$HELPER" validate >"$TMP/invalid.out" 2>"$TMP/invalid.err"; then
+  echo 'unsupported config key unexpectedly passed validation' >&2
+  exit 1
+fi
+grep -F 'Invalid config line 1: unsupported key name' "$TMP/invalid.err" >/dev/null
+if grep -F 'UNSUPPORTED_SECRET_NAME' "$TMP/invalid.err"; then
+  echo 'unsupported key name leaked into validation output' >&2
+  exit 1
+fi
+cp "$ROOT/tests/fixtures/config-v2.3.1.env" "$TMP/config.env"
+
 sh "$HELPER" set-many TS_START_ON_BOOT 0 TS_ENABLE_SSH 1 TS_HOSTNAME phone TS_LOGIN_SERVER 'https://headscale.example.test:8443' TS_UP_ARGS '--accept-dns=false --advertise-routes=10.0.0.0/24' TS_WATCHDOG_ENABLED 0 TS_LOG_MAX_KB 2048
 sh "$HELPER" get | jq -e '.startOnBoot == "0" and .enableSsh == "1" and .hostname == "phone" and .loginServer == "https://headscale.example.test:8443" and (.upArgs | contains("--advertise-routes")) and .watchdogEnabled == "0" and .logMaxKb == "2048"' >/dev/null
 set +u

@@ -43,11 +43,18 @@ load_runtime_config() {
   [ -f "$config_file" ] || return 0
   seen_keys=" "
   line_number=0
+  config_tab=$(printf '\t')
   while IFS= read -r config_line || [ -n "$config_line" ]; do
     line_number=$((line_number + 1))
-    if printf '%s\n' "$config_line" | grep -q '^[[:space:]]*\(#.*\)\?$'; then
-      continue
-    fi
+    config_trimmed="$config_line"
+    while :; do
+      case "$config_trimmed" in
+        " "*) config_trimmed=${config_trimmed# } ;;
+        "$config_tab"*) config_trimmed=${config_trimmed#"$config_tab"} ;;
+        *) break ;;
+      esac
+    done
+    case "$config_trimmed" in ''|\#*) continue ;; esac
     case "$config_line" in
       *=*) ;;
       *) echo "Invalid config line ${line_number}: expected KEY='VALUE'" >&2; return 1 ;;
@@ -56,7 +63,7 @@ load_runtime_config() {
     config_raw=${config_line#*=}
     case "$config_key" in
       TS_START_ON_BOOT|TS_DAEMON_ARGS|TS_UP_ARGS|TS_LOGIN_SERVER|TS_HOSTNAME|TS_ENABLE_SSH|TS_EXTRA_UP_ARGS|TS_WATCHDOG_ENABLED|TS_LOG_MAX_KB) ;;
-      *) echo "Invalid config line ${line_number}: unsupported key ${config_key}" >&2; return 1 ;;
+      *) echo "Invalid config line ${line_number}: unsupported key name" >&2; return 1 ;;
     esac
     case "$seen_keys" in
       *" ${config_key} "*) echo "Invalid config line ${line_number}: duplicate key ${config_key}" >&2; return 1 ;;
