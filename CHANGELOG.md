@@ -1,3 +1,8 @@
+## v2.4.0.2
+
+- Remove the config helper's `realpath` dependency so upgrade preflight works in restricted KernelSU installer environments.
+- Cover missing-`realpath` startup and retain safe installer diagnostics for helper bootstrap failures.
+
 ## v2.4.0.1
 
 - Restore upgrades from the canonical v2.3.1 seven-key `config.env` by replacing the non-portable comment regex with shell parsing and filling new defaults during migration.

@@ -37,7 +37,7 @@ print_config_validation_error() {
 	ERROR_FILE=$1
 	VALIDATION_REASON=$(sed -n '1p' "$ERROR_FILE" 2>/dev/null | tr -d '\r\n')
 	case "$VALIDATION_REASON" in
-		"Invalid config line "*|TS_START_ON_BOOT*|TS_ENABLE_SSH*|TS_WATCHDOG_ENABLED*|TS_LOG_MAX_KB*|TS_LOGIN_SERVER*|TS_HOSTNAME*|"Unsafe shell characters in argument value"|"Newlines are not allowed in argument values"|"Control characters are not allowed in argument values"|"Shell glob characters are not allowed in argument values")
+		"Config helper "*|"Invalid config line "*|TS_START_ON_BOOT*|TS_ENABLE_SSH*|TS_WATCHDOG_ENABLED*|TS_LOG_MAX_KB*|TS_LOGIN_SERVER*|TS_HOSTNAME*|"Unsafe shell characters in argument value"|"Newlines are not allowed in argument values"|"Control characters are not allowed in argument values"|"Shell glob characters are not allowed in argument values")
 			ui_print "! Config validation: $VALIDATION_REASON"
 		;;
 		*)

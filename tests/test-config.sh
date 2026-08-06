@@ -64,7 +64,12 @@ case "$*" in
 esac
 exec /usr/bin/grep "$@"
 SH
-chmod +x "$TMP/strict-bin/grep"
+cat >"$TMP/strict-bin/realpath" <<'SH'
+#!/bin/sh
+echo 'realpath is unavailable in the installer environment' >&2
+exit 127
+SH
+chmod +x "$TMP/strict-bin/grep" "$TMP/strict-bin/realpath"
 cp "$ROOT/tests/fixtures/config-v2.3.1.env" "$TMP/config.env"
 PATH="$TMP/strict-bin:$PATH" sh "$HELPER" validate
 PATH="$TMP/strict-bin:$PATH" busybox sh "$HELPER" validate
