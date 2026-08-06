@@ -28,9 +28,40 @@
 #
 set -e
 DIR=$(dirname "$(realpath "$0")")
-# shellcheck source=../settings.sh
+# shellcheck source=tailscale/settings.sh
 . "$DIR"/../settings.sh
 scripts_name=$(basename "$0")
+CURRENT_TIME=$(date +"%I:%M %P")
+
+is_tailscaled_running() {
+  busybox pgrep -x tailscaled >/dev/null 2>&1
+}
+
+acquire_start_lock() {
+  start_lock="${TS_RUN_DIR}/tailscaled.start.lock"
+  if mkdir "$start_lock" 2>/dev/null; then
+    echo "$$" >"$start_lock/pid"
+    return 0
+  fi
+  owner=$(cat "$start_lock/pid" 2>/dev/null || true)
+  if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null ||
+    ! { [ -r "/proc/$owner/cmdline" ] && tr '\000' ' ' <"/proc/$owner/cmdline" 2>/dev/null | grep -q 'tailscaled.service'; }; then
+    rm -rf "$start_lock"
+    mkdir "$start_lock" 2>/dev/null || return 1
+    echo "$$" >"$start_lock/pid"
+    return 0
+  fi
+  return 1
+}
+
+release_start_lock() {
+  owner=$(cat "${TS_RUN_DIR}/tailscaled.start.lock/pid" 2>/dev/null || true)
+  [ "$owner" = "$$" ] && rm -rf "${TS_RUN_DIR}/tailscaled.start.lock"
+}
+
+sync_watchdog_service() {
+  [ -x "${TS_SCRIPTS_DIR}/tailscaled.config" ] && "${TS_SCRIPTS_DIR}/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+}
 
 program(){
 
@@ -52,7 +83,7 @@ program(){
   log_file="${logdir}/${program_name}.log"
   pid_file="${logdir}/${program_name}.pid"
   is_running(){
-    if PID=$(busybox pgrep -f "${command}"); then
+    if PID=$(busybox pgrep -x "${program_name}"); then
       log Info "✔ ${program_name} service is running with PID: ${PID}."
       return 0
     fi
@@ -60,34 +91,44 @@ program(){
   }
   start(){
     log Info "Starting ${program_name} service."
-    if is_running; then return 0; fi 
-    if ! command -v "$program_name" > /dev/null 2>&1; then log Error "program not found: ${program_name}"; return 1; fi
+    if is_running; then return 0; fi
+    if ! acquire_start_lock; then
+      sleep 4
+      is_running
+      return $?
+    fi
+    trap 'release_start_lock' EXIT
+    trap 'release_start_lock; exit 1' HUP INT TERM
+    if ! command -v "$program_name" > /dev/null 2>&1; then
+      log Error "program not found: ${program_name}"
+      release_start_lock
+      trap - EXIT HUP INT TERM
+      return 1
+    fi
     mkdir -p "${logdir}"
-    [ -f "${log_file}" ] && mv "${log_file}" "${log_file}.bak" # log for old output
+    rotate_log "${log_file}" rename
     if [ ! -z "${pre_up}" ];then $pre_up  2>&1; fi
-    # shellcheck disable=SC2086
-    nohup $command > "${logdir}/${program_name}.log" 2>&1 &
-    PID=$!
-    # log Debug "Command: ${command}"
+    nohup sh -c "$command 2>&1 | sh '$DIR/tailscaled.logwriter' '$log_file'" >/dev/null 2>&1 &
+    wrapper_pid=$!
     sleep 3 # waiting for program really started
-    PID_INFO=$(ps -p $PID -o pid,stime | grep $PID)
-    if [ -n "$PID_INFO" ]; then
-      # shellcheck disable=SC2086
-      set -- $PID_INFO
-      pid=$1
-      stime=$2
-      log Info "✔ ${program_name} service success running with PID: ${pid}, Start time: $stime."
-      echo "$pid" > "${pid_file}"
+    if PID=$(busybox pgrep -x "${program_name}" | busybox head -n 1) && [ -n "$PID" ]; then
+      log Info "✔ ${program_name} service success running with PID: ${PID}."
+      echo "$PID" > "${pid_file}"
       if [ ! -z "${post_up}" ];then ${post_up} 2>&1; fi
+      release_start_lock
+      trap - EXIT HUP INT TERM
       return 0
     else
-      log Error "No process with PID $PID found."
+      kill "$wrapper_pid" 2>/dev/null || true
+      log Error "No running ${program_name} process found."
+      release_start_lock
+      trap - EXIT HUP INT TERM
       return 1
     fi
   }
   stop(){
     log Info "Stopping ${program_name} service."
-    if PID=$(busybox pgrep -f "${command}"); then
+    if PID=$(busybox pgrep -x "${program_name}"); then
       if [ ! -z "${pre_down}" ];then $pre_down  2>&1; fi
       # Use `busybox pkill` to kill the binary with signal 15, otherwise use `killall`.
       if busybox pkill -f -15 -e "${command}" >/dev/null 2>&1; then
@@ -101,7 +142,7 @@ program(){
       return 0
     fi
     sleep 3 # wait the binary has stopped properly
-    if ! busybox pgrep -f "${command}" >/dev/null 2>&1; then
+    if ! busybox pgrep -x "${program_name}" >/dev/null 2>&1; then
       log Info "✘ ${program_name} shutting down, service is stopped."
       log Info "✘ ${program_name} disconnected."
       if [ ! -z "${post_down}" ];then $post_down  2>&1; fi
@@ -122,7 +163,7 @@ program(){
         fi
       fi
       sleep 2
-      if ! busybox pgrep -f "${command}" >/dev/null 2>&1; then
+      if ! busybox pgrep -x "${program_name}" >/dev/null 2>&1; then
         log Info "✔ done, you can sleep peacefully."
         if [ ! -z "${post_down}" ];then $post_down  2>&1; fi
         [ -t 1 ] && echo "${yellow}--------------------------------------------${normal}"
@@ -158,10 +199,12 @@ _tailscaled(){
       program is_running
     ;;
     start)
+      rm -f "${TS_RUN_DIR}/manual-stop"
       if ! program is_running && ! program start; then
         log Warning "Got unfriendly response after start tailscaled !"
         return 1
       fi
+      sync_watchdog_service
       return 0
     ;;
     restart)
@@ -174,10 +217,13 @@ _tailscaled(){
       log Info "Restart success !"
     ;;
     stop)
+      mkdir -p "${TS_RUN_DIR}"
+      : >"${TS_RUN_DIR}/manual-stop"
       if ! program stop; then
         log Error "Got unfriendly response after stop tailscaled !"
         return 1
       fi
+      sync_watchdog_service
     ;;
   esac
 }

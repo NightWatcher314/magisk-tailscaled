@@ -1,0 +1,23 @@
+#!/system/bin/sh
+DIR=$(dirname "$(realpath "$0")")
+# shellcheck source=tailscale/settings.sh
+. "$DIR"/../settings.sh
+
+log_file="${1:-$TS_LOG_FILE}"
+mkdir -p "$(dirname "$log_file")"
+bytes=0
+[ ! -f "$log_file" ] || bytes=$(wc -c <"$log_file" 2>/dev/null || echo 0)
+max_kb="${TS_LOG_MAX_KB:-1024}"
+case "$max_kb" in ''|*[!0-9]*) max_kb=1024;; esac
+[ "$max_kb" -ge 128 ] && [ "$max_kb" -le 10240 ] || max_kb=1024
+max_bytes=$((max_kb * 1024))
+
+while IFS= read -r line || [ -n "$line" ]; do
+  printf '%s\n' "$line" >>"$log_file"
+  bytes=$((bytes + ${#line} + 1))
+  if [ "$bytes" -ge "$max_bytes" ]; then
+    rotate_log "$log_file" rename
+    bytes=0
+    [ ! -f "$log_file" ] || bytes=$(wc -c <"$log_file" 2>/dev/null || echo 0)
+  fi
+done

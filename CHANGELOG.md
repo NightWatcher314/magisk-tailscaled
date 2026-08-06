@@ -1,3 +1,12 @@
+## v2.4.0.0
+
+- Preserve and migrate existing runtime configuration during staged upgrades; pinned lightweight downloads now require both URL and SHA256 before live files change.
+- Add optional watchdog crash recovery with manual-stop protection, six-attempt exponential backoff, restart counters, boot/disable lifecycle sync, and default-off behavior.
+- Add continuously bounded daemon/operation log rotation, merged recent operation history, structured health checks, JSON Netcheck output, and safe configuration copy/import.
+- Replace single-packet Peer tests with five-sample path evolution, last-probe path, average latency, timestamps, and stale-result detection.
+- Split the WebUI runtime bridge into a tested `RuntimeClient`, add adaptive hidden-aware refresh, preserve keyed Peer DOM nodes, and keep stale data visible after refresh failures.
+- Rework CI and Release into version-gated immutable Tag builds with exact lightweight/full assets, `SHA256SUMS`, and remote asset readback.
+
 ## v2.3.1.0
 
 - Add a zero-extra-probe Peer list using the existing status snapshot: name, Tailscale IPs, OS, online/idle state, exit-node role, and the currently known direct/DERP/peer-relay path.

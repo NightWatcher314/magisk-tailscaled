@@ -1,155 +1,38 @@
-export {};
-
 import { buildManagedArgs, getArgValue, getBooleanArg, preserveUnmanagedArgs, splitArgs } from './up-args';
-import { isVisiblePeer, parsePingResult, peerDisplayName, peerPath } from './peers';
+import { isVisiblePeer, peerDisplayName, peerPath, peerProbeIsStale, peerStableKey, type PeerView, type StoredPeerProbe } from './peers';
+import { formatNetcheckSummary, parseRuntimeConfigImport, RuntimeClient, type ActionName, type HealthReport, type NetcheckResult, type RuntimeConfig, type Snapshot, type TailscaleStatus } from './runtime';
 
-declare global {
-  interface Window {
-    Android?: { exec(command: string): string; isModuleInstalled(): boolean };
-    ksu?: { spawn?: (...args: unknown[]) => unknown };
-  }
-}
-
-type ExecResult = { stdout: string; stderr?: string; errno?: number };
-type Peer = {
-  HostName?: string;
-  DNSName?: string;
-  TailscaleIPs?: string[];
-  ExitNodeOption?: boolean;
-  ExitNode?: boolean;
-  Online?: boolean;
-  Active?: boolean;
-  OS?: string;
-  CurAddr?: string;
-  Relay?: string;
-  PeerRelay?: string;
-  LastSeen?: string;
-  ShareeNode?: boolean;
-};
-type TailscaleStatus = {
-  BackendState?: string;
-  Self?: { TailscaleIPs?: string[]; Relay?: string };
-  Peer?: Record<string, Peer>;
-};
-type RuntimeConfig = {
-  startOnBoot?: string;
-  daemonArgs?: string;
-  upArgs?: string;
-  loginServer?: string;
-  hostname?: string;
-  enableSsh?: string;
-  extraUpArgs?: string;
-};
-type Snapshot = {
-  daemon: string;
-  ip: string;
-  log: string;
-  status: TailscaleStatus;
-  config: RuntimeConfig;
-};
-type LogSnapshot = { log?: string };
-
-const HELPER = '/data/adb/tailscale/scripts/tailscaled.config';
+const client = new RuntimeClient();
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = (id: string) => $(id) as HTMLInputElement;
 const select = (id: string) => $(id) as HTMLSelectElement;
-const shq = (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
 let configDirty = false;
 let refreshInFlight: Promise<void> | null = null;
-let logRefreshInFlight: Promise<string> | null = null;
 let latestSnapshot: Snapshot | null = null;
+let latestHealth: HealthReport | null = null;
+let latestNetcheck: NetcheckResult | null = null;
 let preservedUpArgs: string[] = [];
 let runtimeReady = false;
 let operationBusy = false;
 let saveInFlight = false;
 let diagnosticBusy = false;
-let pendingLoginOperationId = '';
-let pendingLoginDeadline = 0;
-const peerTestResults = new Map<string, string>();
-
-function execWithSpawn(mod: typeof import('kernelsu'), command: string, timeoutSeconds: number): Promise<ExecResult> {
-  return new Promise((resolve, reject) => {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    let settled = false;
-    const timer = window.setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error('KernelSU spawn returned no exit event.'));
-    }, (timeoutSeconds + 3) * 1000);
-    const finish = (errno: number) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      resolve({ errno, stdout: stdout.join('\n'), stderr: stderr.join('\n') });
-    };
-    // KernelSU's native bridge concatenates argv into a shell command, so the
-    // sh -c payload must remain one quoted argument. Data callbacks are lines.
-    const child = mod.spawn('sh', ['-c', shq(command)]);
-    child.stdout.on('data', (data: string) => stdout.push(data));
-    child.stderr.on('data', (data: string) => stderr.push(data));
-    child.on('exit', finish);
-    child.on('error', (error: unknown) => {
-      const exitCode = error && typeof error === 'object' && 'exitCode' in error && typeof error.exitCode === 'number' ? error.exitCode : null;
-      if (exitCode !== null) finish(exitCode);
-      else if (!settled) {
-        settled = true;
-        window.clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  });
-}
-
-async function exec(command: string, timeoutSeconds = 10): Promise<string> {
-  const wrapped = `timeout ${timeoutSeconds} sh -c ${shq(command)}`;
-  let moduleError: unknown;
-  try {
-    const mod = await import('kernelsu');
-    const result = typeof window.ksu?.spawn === 'function'
-      ? await execWithSpawn(mod, wrapped, timeoutSeconds)
-      : await mod.exec(wrapped) as ExecResult;
-    const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
-    return result.errno ? `${output}\n[exit ${result.errno}]`.trim() : output;
-  } catch (error) { moduleError = error; }
-  if (window.Android?.exec) return window.Android.exec(wrapped);
-  throw new Error(`WebUI shell API unavailable: ${String(moduleError)}`);
-}
-
-async function execChecked(command: string, timeoutSeconds = 10): Promise<string> {
-  const marker = `__TS_EXIT_${Date.now()}__`;
-  const output = await exec(`{ ${command}; } 2>&1; code=$?; printf '\\n${marker}%s\\n' "$code"`, timeoutSeconds);
-  const match = output.match(new RegExp(`\\n?${marker}(\\d+)\\s*$`));
-  if (!match) throw new Error(output.trim() || 'Command timed out without a result.');
-  const body = output.slice(0, match.index).trim();
-  if (Number(match[1]) !== 0) throw new Error(body || `Command failed with exit ${match[1]}.`);
-  return body;
-}
-
-function parseSnapshot(text: string): Snapshot {
-  let value: unknown;
-  try { value = JSON.parse(text); } catch { throw new Error(`Invalid runtime response: ${text.slice(0, 160)}`); }
-  if (!value || typeof value !== 'object') throw new Error('Runtime response is empty.');
-  const snapshot = value as Partial<Snapshot>;
-  return {
-    daemon: String(snapshot.daemon || 'stopped'),
-    ip: String(snapshot.ip || ''),
-    log: String(snapshot.log || ''),
-    status: snapshot.status || {},
-    config: snapshot.config || {},
-  };
-}
+let peerTestingIp = '';
+let refreshTimer = 0;
+let lastStatusSignature = '';
+let lastConfigSignature = '';
+let exitNodesSignature = '';
+let lastSuccessfulRefreshAt = 0;
+const peerProbes = new Map<string, StoredPeerProbe>();
+const peerCards = new Map<string, HTMLElement>();
+const peerModels = new Map<string, string>();
 
 function removeArgs(args: string[], prefixes: string[], consumeValueFor: string[] = []) {
   const kept: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const matched = prefixes.find(prefix => args[index] === prefix || args[index].startsWith(`${prefix}=`));
-    if (!matched) {
-      kept.push(args[index]);
-      continue;
-    }
-    if (consumeValueFor.includes(matched) && args[index] === matched && args[index + 1] && !args[index + 1].startsWith('-')) index += 1;
+    if (!matched) kept.push(args[index]);
+    else if (consumeValueFor.includes(matched) && args[index] === matched && args[index + 1] && !args[index + 1].startsWith('-')) index += 1;
   }
   return kept;
 }
@@ -158,6 +41,8 @@ function setDirty(dirty = true) {
   configDirty = dirty;
   $('dirty').textContent = dirty ? '有未保存修改' : '已保存';
   $('dirty').classList.toggle('dirty', dirty);
+  $('saveBar').classList.toggle('clean', !dirty);
+  $('saveBar').setAttribute('aria-hidden', String(!dirty));
 }
 
 function setOutput(text: string) {
@@ -187,10 +72,20 @@ function setOutput(text: string) {
   element.append(document.createTextNode(value.slice(lastIndex)));
 }
 
-function setOperation(text = '', busy = false) {
-  operationBusy = busy;
-  $('operation').textContent = text;
-  updateActionAvailability();
+function setLoginUrl(value = '') {
+  const box = $('loginUrlBox');
+  const link = $('loginUrl') as HTMLAnchorElement;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported URL scheme');
+    link.href = url.toString();
+    link.textContent = url.toString();
+    box.classList.remove('hidden');
+  } catch {
+    link.removeAttribute('href');
+    link.textContent = '';
+    box.classList.add('hidden');
+  }
 }
 
 function updateActionAvailability() {
@@ -198,11 +93,20 @@ function updateActionAvailability() {
     button.disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
   });
   ($('save') as HTMLButtonElement).disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
-  ($('netcheck') as HTMLButtonElement).disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady;
+  ['netcheck', 'healthCheck', 'copyReport', 'exportConfig', 'importConfig'].forEach(id => {
+    const button = $(id) as HTMLButtonElement;
+    button.disabled = operationBusy || saveInFlight || diagnosticBusy || (!runtimeReady && id !== 'importConfig');
+  });
   document.querySelectorAll<HTMLButtonElement>('.peer-test').forEach(button => {
     button.disabled = operationBusy || saveInFlight || diagnosticBusy || !runtimeReady || button.dataset.available !== 'true';
   });
   ($('refresh') as HTMLButtonElement).disabled = diagnosticBusy || refreshInFlight !== null;
+}
+
+function setOperation(text = '', busy = false) {
+  operationBusy = busy;
+  $('operation').textContent = text;
+  updateActionAvailability();
 }
 
 function normalizeLoginServer(value: string) {
@@ -251,34 +155,19 @@ function populateArgsUi(upArgs: string) {
 
 function loadExitNodes(status: TailscaleStatus, selected?: string) {
   const current = selected ?? select('exitNode').value;
-  const options = [new Option('不使用 / 清除', '')];
   const peers = status.Peer ? Object.values(status.Peer) : [];
-  for (const peer of peers.filter(item => item.ExitNodeOption)) {
+  const values = peers.filter(item => item.ExitNodeOption).map(peer => {
     const value = peer.TailscaleIPs?.[0] || peer.DNSName || peer.HostName || '';
-    if (!value) continue;
-    options.push(new Option(`${peer.HostName || peer.DNSName || value}${peer.Online ? '' : '（离线）'} — ${value}`, value));
+    return value ? { value, label: `${peer.HostName || peer.DNSName || value}${peer.Online ? '' : '（离线）'} — ${value}` } : null;
+  }).filter((value): value is { value: string; label: string } => Boolean(value));
+  if (current && !values.some(option => option.value === current)) values.push({ value: current, label: `${current}（当前配置，暂不可用）` });
+  const signature = JSON.stringify({ current, values });
+  if (signature !== exitNodesSignature) {
+    select('exitNode').replaceChildren(new Option('不使用 / 清除', ''), ...values.map(option => new Option(option.label, option.value)));
+    exitNodesSignature = signature;
   }
-  if (current && !options.some(option => option.value === current)) {
-    options.push(new Option(`${current}（当前配置，暂不可用）`, current));
-  }
-  select('exitNode').replaceChildren(...options);
   select('exitNode').value = current;
-  input('allowLan').disabled = !select('exitNode').value;
-}
-
-function renderStatus(snapshot: Snapshot) {
-  const status = snapshot.status;
-  const backend = status.BackendState || '-';
-  const online = backend === 'Running';
-  const daemonRunning = snapshot.daemon === 'running';
-  $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止';
-  $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? `Backend: ${backend}` : '服务未运行';
-  $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
-  $('ip').textContent = (status.Self?.TailscaleIPs || []).join(', ') || snapshot.ip || '-';
-  const peers = status.Peer ? Object.values(status.Peer).filter(isVisiblePeer) : [];
-  $('peers').textContent = peers.length ? `${peers.filter(peer => peer.Online).length} 在线 / ${peers.length} 台` : '-';
-  $('relay').textContent = status.Self?.Relay || '-';
-  renderPeers(status);
+  input('allowLan').disabled = !current;
 }
 
 function formatLastSeen(value?: string) {
@@ -289,227 +178,263 @@ function formatLastSeen(value?: string) {
   if (minutes < 1) return '刚刚';
   if (minutes < 60) return `${minutes} 分钟前`;
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} 小时前`;
-  return `${Math.round(hours / 24)} 天前`;
+  return hours < 48 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`;
+}
+
+function createPeerCard(key: string) {
+  const card = document.createElement('article');
+  card.className = 'peer-card';
+  card.dataset.peerKey = key;
+  card.innerHTML = '<div class="peer-header"><div class="peer-identity"><span class="peer-dot"></span><div><strong class="peer-name"></strong><small class="peer-meta"></small></div></div><button class="text-btn peer-test">探测</button></div><div class="peer-details"><code class="peer-address"></code><span class="route-badge"></span></div><div class="peer-result hidden"></div>';
+  peerCards.set(key, card);
+  return card;
+}
+
+function probeText(probe: StoredPeerProbe, peer: PeerView) {
+  const stale = peerProbeIsStale(probe, peer);
+  const replies = `${probe.samples.length}/5 回复`;
+  const average = probe.averageMs === undefined ? '' : ` · 平均 ${probe.averageMs.toFixed(probe.averageMs < 10 ? 1 : 0)} ms`;
+  const tested = new Date(probe.testedAt).toLocaleTimeString();
+  return `本次探测：${probe.sequence.join(' → ') || '无回复'}\n本次最后探测路径：${probe.lastPath}\n${replies}${average} · ${tested}${stale ? ' · 已过期' : ''}`;
+}
+
+function updatePeerCard(card: HTMLElement, peer: PeerView, ip: string) {
+  const path = peerPath(peer);
+  const dnsName = peer.DNSName?.replace(/\.$/, '');
+  const lastSeen = !peer.Online ? formatLastSeen(peer.LastSeen) : '';
+  card.querySelector<HTMLElement>('.peer-dot')!.className = `peer-dot ${peer.Online ? peer.Active ? 'active' : 'online' : 'offline'}`;
+  card.querySelector<HTMLElement>('.peer-name')!.textContent = peerDisplayName(peer);
+  card.querySelector<HTMLElement>('.peer-meta')!.textContent = [peer.OS, dnsName !== peer.HostName ? dnsName : '', lastSeen].filter(Boolean).join(' · ') || 'Peer';
+  card.querySelector<HTMLElement>('.peer-address')!.textContent = peer.TailscaleIPs?.join(', ') || '-';
+  const route = card.querySelector<HTMLElement>('.route-badge')!;
+  route.className = `route-badge ${path.kind}`;
+  route.textContent = `状态路径（最近活动）：${path.label}${peer.ExitNode ? ' · 当前出口节点' : peer.ExitNodeOption ? ' · 可作出口节点' : ''}`;
+  const button = card.querySelector<HTMLButtonElement>('.peer-test')!;
+  button.textContent = peerTestingIp === ip ? '探测中…' : '探测';
+  button.dataset.peerIp = ip;
+  button.dataset.available = String(Boolean(peer.Online && ip));
+  const result = card.querySelector<HTMLElement>('.peer-result')!;
+  const probe = ip ? peerProbes.get(ip) : undefined;
+  result.textContent = peerTestingIp === ip ? '正在进行 5 次按需探测…' : probe ? probeText(probe, peer) : '';
+  result.classList.toggle('hidden', !result.textContent);
+}
+
+function peerEntries(status: TailscaleStatus) {
+  return Object.entries(status.Peer || {}).filter(([, peer]) => isVisiblePeer(peer)).sort(([, left], [, right]) =>
+    Number(Boolean(right.Online)) - Number(Boolean(left.Online)) || Number(Boolean(right.Active)) - Number(Boolean(left.Active)) || peerDisplayName(left).localeCompare(peerDisplayName(right)));
+}
+
+function peerViewModel(peer: PeerView) {
+  return {
+    ID: peer.ID,
+    HostName: peer.HostName,
+    DNSName: peer.DNSName,
+    TailscaleIPs: peer.TailscaleIPs,
+    CurAddr: peer.CurAddr,
+    Relay: peer.Relay,
+    PeerRelay: peer.PeerRelay,
+    Online: peer.Online,
+    Active: peer.Active,
+    ExitNode: peer.ExitNode,
+    ExitNodeOption: peer.ExitNodeOption,
+    OS: peer.OS,
+    LastSeen: peer.LastSeen,
+    LastSeenLabel: peer.Online ? '' : formatLastSeen(peer.LastSeen),
+  };
 }
 
 function renderPeers(status: TailscaleStatus) {
-  const peers = status.Peer ? Object.values(status.Peer).filter(isVisiblePeer) : [];
-  peers.sort((left, right) => Number(Boolean(right.Online)) - Number(Boolean(left.Online)) ||
-    Number(Boolean(right.Active)) - Number(Boolean(left.Active)) || peerDisplayName(left).localeCompare(peerDisplayName(right)));
-  $('peerCount').textContent = peers.length ? `${peers.filter(peer => peer.Online).length} 在线 / ${peers.length}` : '暂无 Peer';
-  const cards = peers.map(peer => {
+  const entries = peerEntries(status);
+  $('peerCount').textContent = entries.length ? `${entries.filter(([, peer]) => peer.Online).length} 在线 / ${entries.length}` : '暂无 Peer';
+  const activeKeys = new Set<string>();
+  const orderedCards: HTMLElement[] = [];
+  for (const [statusKey, peer] of entries) {
+    const key = peerStableKey(statusKey, peer);
     const ip = peer.TailscaleIPs?.[0] || '';
-    const path = peerPath(peer);
-    const card = document.createElement('article');
-    card.className = 'peer-card';
-
-    const header = document.createElement('div');
-    header.className = 'peer-header';
-    const identity = document.createElement('div');
-    identity.className = 'peer-identity';
-    const dot = document.createElement('span');
-    dot.className = `peer-dot ${peer.Online ? peer.Active ? 'active' : 'online' : 'offline'}`;
-    const names = document.createElement('div');
-    const name = document.createElement('strong');
-    name.textContent = peerDisplayName(peer);
-    const meta = document.createElement('small');
-    const dnsName = peer.DNSName?.replace(/\.$/, '');
-    const lastSeen = !peer.Online ? formatLastSeen(peer.LastSeen) : '';
-    meta.textContent = [peer.OS, dnsName !== peer.HostName ? dnsName : '', lastSeen].filter(Boolean).join(' · ') || 'Peer';
-    names.append(name, meta);
-    identity.append(dot, names);
-    const test = document.createElement('button');
-    test.className = 'text-btn peer-test';
-    test.textContent = '测试';
-    test.dataset.peerIp = ip;
-    test.dataset.available = String(Boolean(peer.Online && ip));
-    header.append(identity, test);
-
-    const details = document.createElement('div');
-    details.className = 'peer-details';
-    const address = document.createElement('code');
-    address.textContent = peer.TailscaleIPs?.join(', ') || '-';
-    const route = document.createElement('span');
-    route.className = `route-badge ${path.kind}`;
-    route.textContent = path.label;
-    if (peer.ExitNode) route.textContent += ' · 当前出口节点';
-    else if (peer.ExitNodeOption) route.textContent += ' · 可作出口节点';
-    details.append(address, route);
-    card.append(header, details);
-
-    const result = ip ? peerTestResults.get(ip) : '';
-    if (result) {
-      const diagnostic = document.createElement('div');
-      diagnostic.className = 'peer-result';
-      diagnostic.textContent = result;
-      card.append(diagnostic);
+    const probe = ip ? peerProbes.get(ip) : undefined;
+    const model = JSON.stringify({ peer: peerViewModel(peer), testing: peerTestingIp === ip, probe: probe ? { ...probe, raw: undefined } : null, stale: probe ? peerProbeIsStale(probe, peer) : false });
+    const card = peerCards.get(key) || createPeerCard(key);
+    if (peerModels.get(key) !== model) {
+      updatePeerCard(card, peer, ip);
+      peerModels.set(key, model);
     }
-    return card;
-  });
-  $('peerList').replaceChildren(...cards);
+    activeKeys.add(key);
+    orderedCards.push(card);
+  }
+  for (const [key, card] of peerCards) {
+    if (!activeKeys.has(key)) {
+      card.remove();
+      peerCards.delete(key);
+      peerModels.delete(key);
+    }
+  }
+  if (!orderedCards.length) {
+    $('peerList').replaceChildren(Object.assign(document.createElement('p'), { className: 'hint', textContent: '暂无 Peer。' }));
+  } else {
+    const current = Array.from($('peerList').children);
+    if (current.length !== orderedCards.length || current.some((card, index) => card !== orderedCards[index])) {
+      if (current.some(card => !card.classList.contains('peer-card'))) $('peerList').replaceChildren(...orderedCards);
+      else $('peerList').append(...orderedCards);
+    }
+  }
   updateActionAvailability();
 }
 
-async function runPeerTest(ip: string) {
-  if (!ip || diagnosticBusy || operationBusy || saveInFlight) return;
-  diagnosticBusy = true;
-  peerTestResults.set(ip, '测试中…');
-  if (latestSnapshot) renderPeers(latestSnapshot.status);
-  try {
-    const output = await execChecked(`sh ${HELPER} peer-test ${shq(ip)}`, 12);
-    const result = parsePingResult(output);
-    peerTestResults.set(ip, result ? `${result.latency} · ${result.path}` : output.trim() || '测试完成，无可解析结果');
-    setOutput(result ? `Peer ${ip}：${result.latency}，路径 ${result.path}` : output);
-    setTimeout(() => { void refresh(true); }, 300);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    peerTestResults.set(ip, `失败：${message}`);
-    setOutput(`Peer 测试失败：\n${message}`);
-  } finally {
-    diagnosticBusy = false;
-    if (latestSnapshot) renderPeers(latestSnapshot.status);
-    updateActionAvailability();
-  }
-}
-
-async function runNetcheck() {
-  if (diagnosticBusy || operationBusy || saveInFlight) return;
-  diagnosticBusy = true;
-  updateActionAvailability();
-  const button = $('netcheck') as HTMLButtonElement;
-  button.textContent = '检测中…';
-  $('netcheckOutput').textContent = '正在探测 UDP、IPv4/IPv6、端口映射与 DERP 延迟…';
-  $('netcheckOutput').classList.remove('hidden');
-  try {
-    const output = await execChecked(`sh ${HELPER} netcheck`, 35);
-    $('netcheckOutput').textContent = output || 'Netcheck 完成。';
-    setOutput('Netcheck 已完成，结果显示在 Peer 区域。');
-  } catch (error) {
-    $('netcheckOutput').textContent = `Netcheck 失败：\n${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    diagnosticBusy = false;
-    button.textContent = 'Netcheck';
-    updateActionAvailability();
-  }
+function renderStatus(snapshot: Snapshot) {
+  const backend = snapshot.status.BackendState || '-';
+  const online = backend === 'Running';
+  const daemonRunning = snapshot.daemon === 'running';
+  $('statusLabel').textContent = online ? '已连接' : daemonRunning ? 'daemon 运行中' : '已停止';
+  $('statusDetail').textContent = online ? 'Tailscale backend 正常' : daemonRunning ? `Backend: ${backend}` : '服务未运行';
+  $('statusDot').className = `status-dot ${online ? 'online' : daemonRunning ? 'busy' : 'error'}`;
+  $('ip').textContent = (snapshot.status.Self?.TailscaleIPs || []).join(', ') || snapshot.ip || '-';
+  const peers = peerEntries(snapshot.status);
+  $('peers').textContent = peers.length ? `${peers.filter(([, peer]) => peer.Online).length} 在线 / ${peers.length} 台` : '-';
+  $('relay').textContent = snapshot.status.Self?.Relay || '-';
+  renderPeers(snapshot.status);
 }
 
 function populateConfig(config: RuntimeConfig) {
   const upArgs = String(config.upArgs || '');
   const extraArgs = String(config.extraUpArgs || '');
-  input('startOnBoot').checked = config.startOnBoot === '1' || config.startOnBoot === 'true';
+  input('startOnBoot').checked = ['1', 'true'].includes(config.startOnBoot || '');
+  input('watchdogEnabled').checked = ['1', 'true'].includes(config.watchdogEnabled || '');
   input('loginServer').value = config.loginServer || getArgValue(splitArgs(`${upArgs} ${extraArgs}`), '--login-server');
   input('hostname').value = config.hostname || '';
   input('daemonArgs').value = config.daemonArgs || '';
+  input('logMaxKb').value = config.logMaxKb || '1024';
   populateArgsUi(removeArgs(splitArgs(upArgs), ['--login-server'], ['--login-server']).join(' '));
-  input('tailscaleSsh').checked = config.enableSsh === '1' || config.enableSsh === 'true' || input('tailscaleSsh').checked;
+  input('tailscaleSsh').checked = ['1', 'true'].includes(config.enableSsh || '') || input('tailscaleSsh').checked;
   input('extraUpArgs').value = removeArgs(splitArgs(extraArgs), ['--login-server'], ['--login-server']).join(' ');
   buildArgsFromUi(false);
 }
 
-function renderLog(log: string) {
-  $('log').textContent = log || '暂无日志';
-  if (latestSnapshot) latestSnapshot.log = log;
-  return pendingLoginOperationId && Date.now() < pendingLoginDeadline ? showLoginUrl(log, pendingLoginOperationId) : '';
+function uiConfig(): RuntimeConfig | null {
+  buildArgsFromUi(false);
+  const loginServer = normalizeLoginServer(input('loginServer').value);
+  if (input('loginServer').value.trim() && !loginServer) {
+    setOutput('Control server URL 无效。');
+    return null;
+  }
+  const logMaxKb = input('logMaxKb').value.trim();
+  if (!/^\d+$/.test(logMaxKb) || Number(logMaxKb) < 128 || Number(logMaxKb) > 10240) {
+    setOutput('日志上限必须在 128–10240 KB。');
+    return null;
+  }
+  return {
+    startOnBoot: input('startOnBoot').checked ? '1' : '0',
+    enableSsh: input('tailscaleSsh').checked ? '1' : '0',
+    loginServer,
+    hostname: input('hostname').value,
+    upArgs: input('upArgs').value,
+    extraUpArgs: input('extraUpArgs').value,
+    daemonArgs: input('daemonArgs').value,
+    watchdogEnabled: input('watchdogEnabled').checked ? '1' : '0',
+    logMaxKb,
+  };
 }
 
-async function fetchRuntimeLog(): Promise<string> {
-  if (logRefreshInFlight) return logRefreshInFlight;
-  const request = execChecked(`sh ${HELPER} webui-log`, 5).then(output => {
-    let value: unknown;
-    try { value = JSON.parse(output); } catch { throw new Error(`Invalid log response: ${output.slice(0, 160)}`); }
-    if (!value || typeof value !== 'object') throw new Error('Log response is empty.');
-    return String((value as LogSnapshot).log || '');
+function renderLog(log: string) {
+  if ($('log').textContent !== (log || '暂无日志')) $('log').textContent = log || '暂无日志';
+  if (latestSnapshot) latestSnapshot.log = log;
+}
+
+function clearRefreshTimer() {
+  if (refreshTimer) window.clearTimeout(refreshTimer);
+  refreshTimer = 0;
+}
+
+function scheduleRefresh(delay: number) {
+  clearRefreshTimer();
+  if (document.hidden || diagnosticBusy) return;
+  refreshTimer = window.setTimeout(() => { void refresh(); }, delay);
+}
+
+function snapshotSignature(snapshot: Snapshot) {
+  return JSON.stringify({
+    daemon: snapshot.daemon,
+    backend: snapshot.status.BackendState,
+    self: {
+      TailscaleIPs: snapshot.status.Self?.TailscaleIPs,
+      Relay: snapshot.status.Self?.Relay,
+    },
+    peers: peerEntries(snapshot.status).map(([key, peer]) => [peerStableKey(key, peer), peerViewModel(peer)]),
   });
-  logRefreshInFlight = request;
-  try {
-    return await request;
-  } finally {
-    if (logRefreshInFlight === request) logRefreshInFlight = null;
+}
+
+async function refresh(forceFresh = false): Promise<void> {
+  if ((document.hidden || diagnosticBusy) && !forceFresh) return;
+  clearRefreshTimer();
+  if (refreshInFlight) {
+    const current = refreshInFlight;
+    if (!forceFresh) return current;
+    await current;
   }
+  const button = $('refresh') as HTMLButtonElement;
+  button.disabled = true;
+  button.classList.add('busy');
+  const request = (async () => {
+    const snapshot = await client.snapshot();
+    const signature = snapshotSignature(snapshot);
+    const changed = signature !== lastStatusSignature;
+    latestSnapshot = snapshot;
+    renderStatus(snapshot);
+    const selected = configDirty ? select('exitNode').value : getArgValue(splitArgs(String(snapshot.config.upArgs || '')), '--exit-node');
+    loadExitNodes(snapshot.status, selected);
+    renderLog(snapshot.log);
+    const configSignature = JSON.stringify(snapshot.config);
+    if (!configDirty && configSignature !== lastConfigSignature) populateConfig(snapshot.config);
+    lastConfigSignature = configSignature;
+    lastStatusSignature = signature;
+    lastSuccessfulRefreshAt = Date.now();
+    $('updated').textContent = `最后更新 ${new Date(lastSuccessfulRefreshAt).toLocaleTimeString()}`;
+    runtimeReady = true;
+    const backend = snapshot.status.BackendState;
+    scheduleRefresh(backend !== 'Running' ? 10000 : changed ? 15000 : 30000);
+  })().catch(error => {
+    runtimeReady = latestSnapshot !== null;
+    $('updated').textContent = lastSuccessfulRefreshAt
+      ? `数据可能过期 · 最后成功 ${new Date(lastSuccessfulRefreshAt).toLocaleTimeString()}`
+      : '状态读取失败 · 稍后自动重试';
+    if (!latestSnapshot) {
+      $('statusLabel').textContent = '读取失败';
+      $('statusDetail').textContent = error instanceof Error ? error.message : String(error);
+      $('statusDot').className = 'status-dot error';
+    }
+    scheduleRefresh(60000);
+  }).finally(() => {
+    refreshInFlight = null;
+    button.disabled = false;
+    button.classList.remove('busy');
+    updateActionAvailability();
+  });
+  refreshInFlight = request;
+  updateActionAvailability();
+  return request;
 }
 
 async function refreshLog() {
   const button = $('refreshLog') as HTMLButtonElement;
   button.disabled = true;
   button.textContent = '刷新中…';
-  try {
-    renderLog(await fetchRuntimeLog());
-  } catch (error) {
-    $('log').textContent = `日志读取失败：${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    button.disabled = false;
-    button.textContent = '刷新日志';
-  }
-}
-
-async function refresh(forceFresh = false): Promise<void> {
-  if (diagnosticBusy && !forceFresh) return;
-  if (refreshInFlight) {
-    const current = refreshInFlight;
-    if (!forceFresh) return current;
-    await current;
-  }
-  const refreshButton = $('refresh') as HTMLButtonElement;
-  refreshButton.disabled = true;
-  refreshButton.classList.add('busy');
-  refreshInFlight = (async () => {
-    const output = await execChecked(`sh ${HELPER} webui`, 15);
-    const snapshot = parseSnapshot(output);
-    latestSnapshot = snapshot;
-    renderStatus(snapshot);
-    const selectedExitNode = configDirty ? select('exitNode').value : getArgValue(splitArgs(String(snapshot.config.upArgs || '')), '--exit-node');
-    loadExitNodes(snapshot.status, selectedExitNode);
-    renderLog(snapshot.log);
-    $('updated').textContent = `最后更新 ${new Date().toLocaleTimeString()}`;
-    if (!configDirty) populateConfig(snapshot.config);
-    runtimeReady = true;
-    updateActionAvailability();
-  })().catch(error => {
-    runtimeReady = false;
-    updateActionAvailability();
-    $('updated').textContent = `状态读取失败 ${new Date().toLocaleTimeString()}`;
-    $('statusLabel').textContent = '读取失败';
-    $('statusDetail').textContent = error instanceof Error ? error.message : String(error);
-    $('statusDot').className = 'status-dot error';
-    $('log').textContent = `读取失败：${error instanceof Error ? error.message : String(error)}`;
-  }).finally(() => {
-    refreshInFlight = null;
-    refreshButton.disabled = false;
-    refreshButton.classList.remove('busy');
-  });
-  return refreshInFlight;
+  try { renderLog(await client.log()); }
+  catch (error) { setOutput(`日志读取失败：${error instanceof Error ? error.message : String(error)}`); }
+  finally { button.disabled = false; button.textContent = '刷新日志'; }
 }
 
 async function saveConfig(refreshAfterSave = true) {
   if (saveInFlight || operationBusy || diagnosticBusy) return false;
+  const config = uiConfig();
+  if (!config) return false;
   saveInFlight = true;
   updateActionAvailability();
-  const saveButton = $('save') as HTMLButtonElement;
-  saveButton.textContent = '保存中…';
+  const button = $('save') as HTMLButtonElement;
+  button.textContent = '保存中…';
   setOutput('正在保存配置…');
-  buildArgsFromUi();
-  const loginServer = normalizeLoginServer(input('loginServer').value);
-  if (input('loginServer').value.trim() && !loginServer) {
-    setOutput('Control server URL 无效。');
-    saveInFlight = false;
-    saveButton.textContent = '保存配置';
-    updateActionAvailability();
-    return false;
-  }
-  const pairs: [string, string][] = [
-    ['TS_START_ON_BOOT', input('startOnBoot').checked ? '1' : '0'],
-    ['TS_ENABLE_SSH', input('tailscaleSsh').checked ? '1' : '0'],
-    ['TS_LOGIN_SERVER', loginServer],
-    ['TS_HOSTNAME', input('hostname').value],
-    ['TS_UP_ARGS', input('upArgs').value],
-    ['TS_EXTRA_UP_ARGS', input('extraUpArgs').value],
-    ['TS_DAEMON_ARGS', input('daemonArgs').value],
-  ];
-  const args = pairs.map(([key, value]) => `${key} ${shq(value)}`).join(' ');
   try {
-    await execChecked(`sh ${HELPER} set-many ${args}`, 12);
+    await client.saveConfig(config);
     setDirty(false);
+    lastConfigSignature = JSON.stringify(config);
     setOutput('配置已保存。点击“应用并连接”使 up 参数生效。');
     if (refreshAfterSave) await refresh(true);
     return true;
@@ -518,114 +443,244 @@ async function saveConfig(refreshAfterSave = true) {
     return false;
   } finally {
     saveInFlight = false;
-    saveButton.textContent = '保存配置';
+    button.textContent = '保存配置';
     updateActionAvailability();
   }
 }
 
-function operationIdFromOutput(output: string) {
-  return output.match(/^OPERATION_ID=(.+)$/m)?.[1]?.trim() || '';
-}
-
-function loginUrlFromLog(log: string, operationId: string) {
-  const marker = operationId ? `=== OPERATION ${operationId} login ===` : '';
-  if (marker && !log.includes(marker)) return '';
-  const relevant = marker ? log.slice(log.lastIndexOf(marker)) : log;
-  const urls = [...relevant.matchAll(/https?:\/\/[^\s<]+/gi)];
-  return urls[urls.length - 1]?.[0]?.replace(/[),.;]+$/, '') || '';
-}
-
-function operationExitFromLog(log: string, operationId: string) {
-  const marker = `=== OPERATION ${operationId} END exit=`;
-  const start = log.lastIndexOf(marker);
-  if (start < 0) return null;
-  const match = log.slice(start + marker.length).match(/^(\d+) ===/);
-  return match ? Number(match[1]) : null;
-}
-
-function showLoginUrl(log: string, operationId: string) {
-  if (!operationId || pendingLoginOperationId !== operationId) return '';
-  const url = loginUrlFromLog(log, operationId);
-  if (!url) return '';
-  pendingLoginOperationId = '';
-  setOutput(`登录 URL：\n${url}\n\n点击链接打开。`);
-  return url;
-}
-
-async function pollLoginUrl(operationId: string) {
-  while (pendingLoginOperationId === operationId && Date.now() < pendingLoginDeadline) {
-    try {
-      const log = await fetchRuntimeLog();
-      if (renderLog(log)) return;
-      const exitCode = operationExitFromLog(log, operationId);
-      if (exitCode !== null) {
-        pendingLoginOperationId = '';
-        setOutput(exitCode === 0
-          ? '登录命令已完成，未返回新 URL；设备可能已经登录。'
-          : `登录命令失败（exit ${exitCode}）。请查看最近日志。`);
-        return;
-      }
-    } catch (error) {
-      $('log').textContent = `日志读取失败：${error instanceof Error ? error.message : String(error)}`;
-    }
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  if (pendingLoginOperationId === operationId) {
-    pendingLoginOperationId = '';
-    setOutput('60 秒内未发现登录 URL。请查看最近日志或重试登录。');
-  }
-}
-
-async function runAction(command: string, message: string, background = false, captureLoginUrl = false) {
+async function runAction(action: ActionName, message: string) {
   if (operationBusy || saveInFlight || diagnosticBusy) return false;
-  if (!captureLoginUrl) pendingLoginOperationId = '';
   setOperation(message, true);
   setOutput(message);
+  if (action === 'login') setLoginUrl();
+  clearRefreshTimer();
+  const button = $(action) as HTMLButtonElement;
+  const buttonText = button.textContent || '';
+  const busyText = action === 'login' ? '等待 URL…' : action === 'up' ? '连接中…' : action === 'down' ? '断开中…' : '重启中…';
+  button.textContent = busyText;
   try {
-    const output = await execChecked(command, background ? 10 : 25);
-    const operationId = operationIdFromOutput(output);
-    if (captureLoginUrl && operationId) {
-      pendingLoginOperationId = operationId;
-      pendingLoginDeadline = Date.now() + 60000;
-    }
-    if (background) {
-      setOutput(captureLoginUrl ? `${output}\n\n正在等待登录 URL…` : (output || '后台操作已启动。'));
-      if (captureLoginUrl && operationId) void pollLoginUrl(operationId);
-      else setTimeout(() => { void refresh(true); }, 1500);
-    } else {
-      await refresh(true);
-      setOutput(output || '操作已完成。');
-    }
+    const result = await client.action(action, {
+      onProgress: progress => {
+        renderLog(progress.log);
+        if (progress.url) setLoginUrl(progress.url);
+      },
+    });
+    if (result.log) renderLog(result.log);
+    if (result.url) setLoginUrl(result.url);
+    setOutput(result.message);
+    if (result.background) scheduleRefresh(1500);
+    else await refresh(true);
     return true;
   } catch (error) {
     setOutput(`操作失败：\n${error instanceof Error ? error.message : String(error)}`);
     return false;
   } finally {
+    button.textContent = buttonText;
     setOperation('', false);
+    scheduleRefresh(1000);
+  }
+}
+
+async function runPeerTest(ip: string) {
+  if (!ip || diagnosticBusy || operationBusy || saveInFlight || !latestSnapshot) return;
+  diagnosticBusy = true;
+  peerTestingIp = ip;
+  clearRefreshTimer();
+  renderPeers(latestSnapshot.status);
+  updateActionAvailability();
+  try {
+    const probe = await client.peerProbe(ip);
+    await refresh(true);
+    const peer = Object.values(latestSnapshot?.status.Peer || {}).find(item => item.TailscaleIPs?.includes(ip));
+    peerProbes.set(ip, { ...probe, statusPathAtTest: peer ? peerPath(peer).label : '' });
+    const average = probe.averageMs === undefined ? '' : `，平均 ${probe.averageMs.toFixed(1)} ms`;
+    setOutput(`Peer ${ip}：${probe.samples.length}/5 回复${average}\n路径：${probe.sequence.join(' → ') || '无回复'}\n本次最后探测路径：${probe.lastPath}`);
+  } catch (error) {
+    setOutput(`Peer 探测失败：\n${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    peerTestingIp = '';
+    diagnosticBusy = false;
+    if (latestSnapshot) renderPeers(latestSnapshot.status);
+    updateActionAvailability();
+    scheduleRefresh(1000);
+  }
+}
+
+async function runNetcheck() {
+  if (diagnosticBusy || operationBusy || saveInFlight) return;
+  diagnosticBusy = true;
+  clearRefreshTimer();
+  updateActionAvailability();
+  const button = $('netcheck') as HTMLButtonElement;
+  button.textContent = '检测中…';
+  $('netcheckSummary').textContent = '正在探测 UDP、IPv4/IPv6、端口映射与 DERP 延迟…';
+  $('netcheckRaw').textContent = '';
+  try {
+    latestNetcheck = await client.netcheck();
+    $('netcheckSummary').textContent = formatNetcheckSummary(latestNetcheck);
+    $('netcheckRaw').textContent = `${JSON.stringify(latestNetcheck.report, null, 2)}${latestNetcheck.warnings ? `\n\nWarnings:\n${latestNetcheck.warnings}` : ''}`;
+    setOutput('Netcheck 已完成。');
+  } catch (error) {
+    $('netcheckSummary').textContent = `Netcheck 失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    diagnosticBusy = false;
+    button.textContent = '运行 Netcheck';
+    updateActionAvailability();
+    scheduleRefresh(1000);
+  }
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1048576) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1048576).toFixed(1)} MB`;
+}
+
+function renderHealth(report: HealthReport) {
+  const items = [
+    ['Daemon', report.daemonRunning ? '运行中' : '已停止'],
+    ['Backend / TUN', `${report.backend} / ${report.tun ? '启用' : '关闭'}`],
+    ['模块 / CLI', `${report.moduleVersion || '-'} / ${report.cliVersion || '-'}`],
+    ['SELinux', report.selinux],
+    ['配置', `${report.config.valid && report.config.readable ? '正常' : '异常'} · ${report.config.mode}`],
+    ['Watchdog', `${report.watchdog.enabled ? report.watchdog.running ? '运行中' : '已启用但未运行' : '关闭'} · 重启 ${report.watchdog.restarts}`],
+    ['日志', `daemon ${formatBytes(report.logs.daemonBytes)} · 操作 ${formatBytes(report.logs.runBytes)}`],
+    ['Tailscale Health', report.health.length ? report.health.join('；') : '无告警'],
+  ];
+  $('healthGrid').replaceChildren(...items.map(([label, value]) => {
+    const item = document.createElement('div');
+    const name = document.createElement('span');
+    const result = document.createElement('strong');
+    name.textContent = label;
+    result.textContent = value;
+    item.append(name, result);
+    return item;
+  }));
+}
+
+async function runHealth() {
+  if (diagnosticBusy || operationBusy || saveInFlight) return;
+  diagnosticBusy = true;
+  clearRefreshTimer();
+  updateActionAvailability();
+  const button = $('healthCheck') as HTMLButtonElement;
+  button.textContent = '检查中…';
+  try {
+    latestHealth = await client.health();
+    renderHealth(latestHealth);
+    setOutput('健康检查已完成。');
+  } catch (error) {
+    setOutput(`健康检查失败：\n${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    diagnosticBusy = false;
+    button.textContent = '运行健康检查';
+    updateActionAvailability();
+    scheduleRefresh(1000);
+  }
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const area = document.createElement('textarea');
+  area.value = value;
+  document.body.append(area);
+  area.select();
+  document.execCommand('copy');
+  area.remove();
+}
+
+function redactedReport() {
+  if (!latestHealth) return '';
+  const netcheck = latestNetcheck?.report;
+  return JSON.stringify({
+    moduleVersion: latestHealth.moduleVersion,
+    cliVersion: latestHealth.cliVersion,
+    daemonRunning: latestHealth.daemonRunning,
+    backend: latestHealth.backend,
+    tun: latestHealth.tun,
+    healthIssueCount: latestHealth.health.length,
+    selinux: latestHealth.selinux,
+    config: latestHealth.config,
+    watchdog: latestHealth.watchdog,
+    logs: latestHealth.logs,
+    netcheck: netcheck ? {
+      UDP: netcheck.UDP,
+      IPv4: netcheck.IPv4,
+      IPv6: netcheck.IPv6,
+      MappingVariesByDestIP: netcheck.MappingVariesByDestIP,
+      UPnP: netcheck.UPnP,
+      PMP: netcheck.PMP,
+      PCP: netcheck.PCP,
+      PreferredDERP: netcheck.PreferredDERP,
+    } : null,
+  }, null, 2);
+}
+
+async function copyReport() {
+  if (!latestHealth) await runHealth();
+  const report = redactedReport();
+  if (!report) return;
+  try { await copyText(report); setOutput('脱敏诊断报告已复制。'); }
+  catch (error) { setOutput(`复制失败：${error instanceof Error ? error.message : String(error)}`); }
+}
+
+async function exportConfig() {
+  const config = latestSnapshot?.config;
+  if (!config) { setOutput('运行配置尚未读取。'); return; }
+  const text = JSON.stringify(config, null, 2);
+  input('configTransfer').value = text;
+  try { await copyText(text); setOutput('配置 JSON 已复制；不包含节点状态或密钥。'); }
+  catch { setOutput('配置 JSON 已生成到文本框。'); }
+}
+
+function importConfig() {
+  try {
+    if (!latestSnapshot) throw new Error('运行配置尚未读取，暂不能导入');
+    const imported = parseRuntimeConfigImport(input('configTransfer').value);
+    populateConfig({ ...latestSnapshot.config, ...imported });
+    setDirty(true);
+    setOutput('配置已导入到表单，尚未保存。请检查后点击“保存配置”。');
+  } catch (error) {
+    setOutput(`配置导入失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 function init() {
   updateActionAvailability();
-  $('refresh').addEventListener('click', () => refresh());
+  $('refresh').addEventListener('click', () => refresh(true));
   $('refreshLog').addEventListener('click', refreshLog);
   $('netcheck').addEventListener('click', runNetcheck);
+  $('healthCheck').addEventListener('click', runHealth);
+  $('copyReport').addEventListener('click', copyReport);
+  $('copyLoginUrl').addEventListener('click', async () => {
+    const url = ($('loginUrl') as HTMLAnchorElement).href;
+    if (!url) return;
+    try { await copyText(url); setOutput('登录 URL 已复制。'); }
+    catch (error) { setOutput(`复制失败：${error instanceof Error ? error.message : String(error)}`); }
+  });
+  $('exportConfig').addEventListener('click', exportConfig);
+  $('importConfig').addEventListener('click', importConfig);
   $('peerList').addEventListener('click', event => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('.peer-test');
     if (button?.dataset.peerIp) void runPeerTest(button.dataset.peerIp);
   });
-  $('login').addEventListener('click', () => runAction(`sh ${HELPER} login-bg`, '正在启动登录…', true, true));
-  $('up').addEventListener('click', async () => { if (await saveConfig(false)) await runAction(`sh ${HELPER} up-bg`, '正在应用配置…', true); });
-  $('down').addEventListener('click', () => runAction(`sh ${HELPER} down`, '正在断开…'));
-  $('restart').addEventListener('click', () => runAction(`sh ${HELPER} restart`, '正在重启 daemon…'));
+  $('login').addEventListener('click', () => runAction('login', '正在启动登录并等待 URL…'));
+  $('up').addEventListener('click', async () => { if (await saveConfig(false)) await runAction('up', '正在应用配置…'); });
+  $('down').addEventListener('click', () => runAction('down', '正在断开…'));
+  $('restart').addEventListener('click', () => runAction('restart', '正在重启 daemon…'));
   $('save').addEventListener('click', () => saveConfig());
-  ['startOnBoot', 'acceptDns', 'acceptRoutes', 'tailscaleSsh', 'advertiseExitNode', 'allowLan', 'shieldsUp', 'exitNode']
+  ['startOnBoot', 'watchdogEnabled', 'acceptDns', 'acceptRoutes', 'tailscaleSsh', 'advertiseExitNode', 'allowLan', 'shieldsUp', 'exitNode']
     .forEach(id => $(id).addEventListener('change', () => buildArgsFromUi(true)));
-  ['loginServer', 'hostname', 'extraUpArgs', 'daemonArgs']
+  ['loginServer', 'hostname', 'extraUpArgs', 'daemonArgs', 'logMaxKb']
     .forEach(id => $(id).addEventListener('input', () => setDirty(true)));
-  refresh();
-  setInterval(() => { if (!document.hidden) refresh(); }, 10000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) clearRefreshTimer();
+    else void refresh(true);
+  });
+  void refresh(true);
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

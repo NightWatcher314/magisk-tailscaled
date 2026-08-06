@@ -1,0 +1,102 @@
+#!/system/bin/sh
+DIR=$(dirname "$(realpath "$0")")
+# shellcheck source=tailscale/settings.sh
+. "$DIR"/../settings.sh
+
+PID_FILE="${TS_RUN_DIR}/watchdog.pid"
+LOCK_DIR="${TS_RUN_DIR}/watchdog.lock"
+MANUAL_STOP_FILE="${TS_RUN_DIR}/manual-stop"
+RESTART_COUNT_FILE="${TS_RUN_DIR}/watchdog-restarts"
+failure_streak=0
+healthy_checks=0
+loop_count=0
+max_recovery_attempts="${TS_WATCHDOG_MAX_RECOVERY_ATTEMPTS:-6}"
+case "$max_recovery_attempts" in ''|*[!0-9]*) max_recovery_attempts=6;; esac
+
+is_watchdog_pid() {
+  pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'tailscaled.watchdog'
+}
+
+mkdir -p "$TS_RUN_DIR"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+  if is_watchdog_pid "$owner"; then
+    exit 0
+  fi
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+fi
+echo "$$" >"$LOCK_DIR/pid"
+echo "$$" >"$PID_FILE"
+
+cleanup() {
+  current=$(cat "$PID_FILE" 2>/dev/null || true)
+  [ "$current" = "$$" ] && rm -f "$PID_FILE"
+  owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+  [ "$owner" = "$$" ] && rm -rf "$LOCK_DIR"
+}
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+
+backoff_seconds() {
+  [ -n "${TS_WATCHDOG_TEST_DELAY:-}" ] && { echo "$TS_WATCHDOG_TEST_DELAY"; return; }
+  case "$1" in
+    1) echo 5 ;;
+    2) echo 15 ;;
+    3) echo 30 ;;
+    4) echo 60 ;;
+    5) echo 120 ;;
+    *) echo 300 ;;
+  esac
+}
+
+sleep_interval() {
+  sleep "${TS_WATCHDOG_INTERVAL:-30}"
+}
+
+while true; do
+  load_runtime_config "$TS_CONFIG_FILE"
+  case "${TS_WATCHDOG_ENABLED:-0}" in 1|true) ;; *) exit 0;; esac
+  case "${TS_START_ON_BOOT:-1}" in 1|true) ;; *) exit 0;; esac
+  [ -f "${TS_MOD_DIR}/disable" ] && exit 0
+  [ -f "$MANUAL_STOP_FILE" ] && exit 0
+
+  if busybox pgrep -x tailscaled >/dev/null 2>&1; then
+    healthy_checks=$((healthy_checks + 1))
+    [ "$healthy_checks" -ge 4 ] && failure_streak=0
+    sleep_interval
+  else
+    healthy_checks=0
+    failure_streak=$((failure_streak + 1))
+    if [ "$failure_streak" -gt "$max_recovery_attempts" ]; then
+      log Error "Watchdog stopped after ${max_recovery_attempts} consecutive recovery attempts."
+      exit 1
+    fi
+    delay=$(backoff_seconds "$failure_streak")
+    log Warning "Watchdog detected tailscaled stopped; retry ${failure_streak} in ${delay}s."
+    sleep "$delay"
+
+    load_runtime_config "$TS_CONFIG_FILE"
+    case "${TS_WATCHDOG_ENABLED:-0}" in 1|true) ;; *) exit 0;; esac
+    case "${TS_START_ON_BOOT:-1}" in 1|true) ;; *) exit 0;; esac
+    [ -f "$MANUAL_STOP_FILE" ] && exit 0
+    [ -f "${TS_MOD_DIR}/disable" ] && exit 0
+    busybox pgrep -x tailscaled >/dev/null 2>&1 && continue
+
+    if tailscaled.service start >>"${TS_RUN_LOG_FILE}" 2>&1; then
+      count=$(cat "$RESTART_COUNT_FILE" 2>/dev/null || echo 0)
+      case "$count" in ''|*[!0-9]*) count=0;; esac
+      count=$((count + 1))
+      echo "$count" >"$RESTART_COUNT_FILE"
+      log Success "Watchdog restarted tailscaled; total restarts ${count}."
+    else
+      log Error "Watchdog restart attempt ${failure_streak} failed."
+    fi
+  fi
+
+  loop_count=$((loop_count + 1))
+  [ -n "${TS_WATCHDOG_MAX_LOOPS:-}" ] && [ "$loop_count" -ge "$TS_WATCHDOG_MAX_LOOPS" ] && exit 0
+done

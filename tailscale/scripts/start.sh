@@ -1,11 +1,13 @@
 #!/system/bin/sh
 DIR=$(dirname "$(realpath "$0")")
-# shellcheck source=../settings.sh
+# shellcheck source=tailscale/settings.sh
 . "$DIR"/../settings.sh
 case "$1" in
     postinstall)
-      rm -rf "$TS_RUN_DIR" && mkdir -p "$TS_RUN_DIR"
+      mkdir -p "$TS_RUN_DIR"
+      log Info "Applying updated Magisk Tailscaled runtime."
       tailscaled.service restart >> "/dev/null" 2>&1 &
+      tailscaled.config watchdog-sync >/dev/null 2>&1 || true
       exit 0
     ;;
 esac
@@ -21,11 +23,12 @@ start_inotifyd() {
       kill -9 "$PID"
     fi
   done
-  echo "${CURRENT_TIME} [Info]: Starting tailscaled inotify service" > "${TS_RUN_LOG_FILE}"
+  log Info "Starting tailscaled inotify service."
   inotifyd "tailscaled.inotify" "${TS_MOD_DIR}" >> "/dev/null" 2>&1 &
 }
 
 module_version=$(busybox awk -F'=' '!/^ *#/ && /version=/ { print $2 }' "$TS_MOD_PROP" 2>/dev/null)
 log Info "Magisk Tailscaled version : ${module_version}."
 start_service
+tailscaled.config watchdog-sync >/dev/null 2>&1 || true
 start_inotifyd

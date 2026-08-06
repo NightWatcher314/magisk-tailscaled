@@ -12,7 +12,7 @@ TAILSCALE_ARM64_SHA256="${TAILSCALE_ARM64_SHA256:-0e1545aa19b6c89a4601c9eab1f1a1
 JQ_ARM_SHA256="${JQ_ARM_SHA256:-f885443795bb6968e9641ec2876e9a86847ba82bdee7fd123c7d32545d474b86}"
 JQ_ARM64_SHA256="${JQ_ARM64_SHA256:-100d88b043eb9286eb71f1a28fd3f7f92adca98f78796af82a738c930e57f87b}"
 
-download() { local url="$1"; shift; curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 180 "$url" "$@"; }
+download() { local url="$1"; shift; curl --fail --silent --show-error --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 180 "$url" "$@"; }
 get_release_json() { download "https://api.github.com/repos/$1/releases/tags/$2"; }
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 zip_dir() {
@@ -45,6 +45,18 @@ npm --prefix webui run lint
 npm --prefix webui test
 npm --prefix webui audit --audit-level=high --registry=https://registry.npmjs.org
 tests/test-config.sh
+tests/test-installer.sh
+tests/test-watchdog.sh
+tests/test-logs.sh
+tests/test-version.sh "$VERSION"
+for script in customize.sh service.sh uninstall.sh tailscale/settings.sh tailscale/scripts/*; do
+  sh -n "$script"
+  command -v busybox >/dev/null 2>&1 && busybox sh -n "$script"
+  command -v mksh >/dev/null 2>&1 && mksh -n "$script"
+done
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck -s sh customize.sh service.sh uninstall.sh tailscale/settings.sh tailscale/scripts/*
+fi
 PROJECT_ROOT=$(pwd)
 (cd webui && ./node_modules/.bin/parcel build src/index.html --dist-dir "$PROJECT_ROOT/webroot" --public-url ./ --no-source-maps)
 python3 - <<'PY'
@@ -105,9 +117,9 @@ LIGHT="${DIST_DIR}/Magisk-Tailscaled-${VERSION}.zip"
 FULL="${DIST_DIR}/Magisk-Tailscaled-${VERSION}-full.zip"
 rm -f "$LIGHT" "$FULL"
 echo "Creating lightweight zip..."
-zip_dir "$LIGHT" '.git*' '.github/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' 'tailscale/bin/*' '.shellcheckrc' 'system/*'
+zip_dir "$LIGHT" '.git*' '.github/*' 'browser-qa/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' 'tailscale/bin/*' '.shellcheckrc' 'system/*'
 echo "Creating full zip..."
-zip_dir "$FULL" '.git*' '.github/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' '.shellcheckrc' 'system/*'
+zip_dir "$FULL" '.git*' '.github/*' 'browser-qa/*' 'dist/*' 'tests/*' 'webui/*' '*.zip' '*.md' '.shellcheckrc' 'system/*'
 python3 - "$LIGHT" "$FULL" <<'PY'
 import sys, zipfile
 for archive in sys.argv[1:]:
@@ -118,6 +130,12 @@ for archive in sys.argv[1:]:
         assert any(n.startswith('webroot/') and n.endswith('.css') for n in names), f'{archive}: missing WebUI CSS'
 PY
 rm -f "$BIN_DIR"/*
+
+(
+  cd "$DIST_DIR"
+  sha256sum "Magisk-Tailscaled-${VERSION}.zip" "Magisk-Tailscaled-${VERSION}-full.zip" >SHA256SUMS
+)
+tests/test-package.sh "$VERSION"
 
 ls -lh "$DIST_DIR"
 echo "Created $LIGHT and $FULL"

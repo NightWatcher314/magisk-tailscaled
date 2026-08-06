@@ -6,3 +6,4 @@ webroot/
 webui/node_modules/
 webui/.parcel-cache/
 system/
+browser-qa/

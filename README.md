@@ -38,13 +38,15 @@ su -c 'tailscale set --accept-dns=false'
 KernelSU/APatch users can open the module WebUI to:
 
 - View daemon/backend status, recent logs, and Peer names, IPs, online state,
-  exit-node role, and currently known direct/DERP/peer-relay paths.
-- Run a single on-demand Peer latency/path test or a full on-demand Netcheck;
+  exit-node role, and recently observed direct/DERP/Peer Relay paths.
+- Run a five-sample on-demand Peer latency/path probe or a full JSON Netcheck;
   neither diagnostic runs continuously in the background.
+- Run a structured health check and copy an allowlist-based redacted report.
 - Run login, up/apply, down, and daemon restart.
 - Configure boot autostart, control server URL for Headscale, hostname,
   Tailscale SSH, common `tailscale up` checkboxes, exit-node selection, extra
-  advanced up args, and daemon args.
+  advanced up args, daemon args, optional watchdog recovery, and log size.
+- Copy the saved runtime configuration or import WebUI-managed fields without node state or keys.
 
 The WebUI writes `/data/adb/tailscale/config.env` through `tailscaled.config`.
 It does not accept arbitrary config keys.
@@ -56,11 +58,19 @@ su -c tailscaled.service status
 su -c tailscaled.service restart
 su -c tailscaled.service log daemon
 su -c tailscaled.config get
+su -c tailscaled.config health
+su -c tailscaled.config netcheck
 su -c "tailscaled.config set TS_UP_ARGS '--accept-dns=false'"
 su -c tailscaled.config up
 ```
 
 ## Runtime behavior
+
+Upgrades stage and validate binaries/scripts before switching the live runtime.
+Existing `config.env`, node state, SSH material, certificates, and logs remain in
+place; the old managed runtime and a configuration copy remain under `backups/`.
+The optional watchdog is disabled by default and respects manual stop, module
+disable, and boot-autostart settings.
 
 Current default daemon command:
 

@@ -13,7 +13,7 @@
 verify_sha256() {
 	FILE=$1
 	EXPECTED=$2
-	[ -n "$EXPECTED" ] || return 0
+	[ -n "$EXPECTED" ] || { ui_print "! Missing required SHA256 for $(basename "$FILE")"; return 1; }
 	if command -v sha256sum >/dev/null 2>&1; then
 		ACTUAL=$(sha256sum "$FILE" | awk '{print $1}')
 	elif command -v busybox >/dev/null 2>&1 && busybox sha256sum "$FILE" >/dev/null 2>&1; then
@@ -33,26 +33,17 @@ manifest_lookup() {
 	eval "printf %s \"\${$KEY:-}\""
 }
 
-# Github download helper; prefers pinned manifest URLs and verifies sha256 when available.
+# Github download helper; requires pinned manifest URLs and SHA256.
 gh_download() {
-	REPO=$1
-	MATCH=$2
-	MANIFEST_PREFIX=${3:-}
+	MANIFEST_PREFIX=${1:-}
 	DOWNLOAD_URL=""
 	EXPECTED_SHA=""
 	if [ -n "$MANIFEST_PREFIX" ]; then
 		DOWNLOAD_URL=$(manifest_lookup "${MANIFEST_PREFIX}_URL" || true)
 		EXPECTED_SHA=$(manifest_lookup "${MANIFEST_PREFIX}_SHA256" || true)
 	fi
-	[ -n "$DOWNLOAD_URL" ] || DOWNLOAD_URL=$(
-		wget --timeout=10 -qO- "https://api.github.com/repos/${REPO}/releases/latest" |
-			grep "browser_download_url" |
-			grep "${MATCH}" |
-			sed 's/.*"browser_download_url": "\([^"]*\)".*/\1/' ||
-			true
-	)
-	if [ -z "$DOWNLOAD_URL" ]; then
-		ui_print "! Unable to get release from https://github.com/${REPO}/releases"
+	if [ -z "$DOWNLOAD_URL" ] || [ -z "$EXPECTED_SHA" ]; then
+		ui_print "! Missing pinned URL or SHA256 for $MANIFEST_PREFIX"
 		return 1
 	fi
 	FILENAME=$(basename "$DOWNLOAD_URL")
@@ -73,7 +64,7 @@ if [ "$BOOTMODE" != true ]; then
 	ui_print "! Please install in Magisk Manager or KernelSU Manager"
 	ui_print "! Install from recovery is NOT supported"
 	abort "-----------------------------------------------------------"
-elif [ "$KSU" = true ] && [ "$KSU_VER_CODE" -lt 10670 ]; then
+elif [ "${KSU:-false}" = true ] && [ "${KSU_VER_CODE:-0}" -lt 10670 ]; then
 	abort "error: Please update your KernelSU and KernelSU Manager"
 fi
 
@@ -84,8 +75,7 @@ TS_BIN_DIR="$TS_DIR/bin"
 TS_SCRIPTS_DIR="$TS_DIR/scripts"
 
 case $ARCH in
-arm) F_ARCH="armv7a" ;;
-arm64) F_ARCH="aarch64" ;;
+arm|arm64) ;;
 *)
 	ui_print "Unsupported architecture: $ARCH"
 	abort
@@ -93,48 +83,100 @@ arm64) F_ARCH="aarch64" ;;
 esac
 ui_print "- Detected architecture: $ARCH"
 
-if [ -d "$TS_DIR" ]; then
-	[ -f "$TS_DIR/tmp/tailscaled.state" ] && mv -f "$TS_DIR/tmp/tailscaled.state" "$TS_DIR/tailscaled.state"
-	ui_print "- Backup old files"
-	PROP_FILE="$(echo "$MODPATH" | sed 's/_update//')/module.prop"
-	[ ! -f "$PROP_FILE" ] && PROP_FILE="$MODPATH/module.prop"
-	versionCode=$(grep '^versionCode=' "$PROP_FILE" | cut -d= -f2)
-	# shellcheck disable=SC2154
-	rm -rf "$TS_DIR/backups/$versionCode/" && mkdir -p "$TS_DIR/backups/$versionCode/"
-	for p in "$TS_DIR"/*; do
-		case "$(basename "$p")" in
-		ssh | certs | backups | tailscaled.state) ;;
-		*)
-			mv -f -- "$p" "$TS_DIR/backups/$versionCode/"
-			;;
-		esac
-	done
-fi
-
-mkdir -p "$TS_BIN_DIR" "$MODPATH/tailscale"
+STAGE_TS_DIR="$TMPDIR/tailscale-stage"
+STAGE_BIN_DIR="$STAGE_TS_DIR/bin"
+STAGE_SCRIPTS_DIR="$STAGE_TS_DIR/scripts"
+mkdir -p "$STAGE_BIN_DIR" "$STAGE_SCRIPTS_DIR" "$MODPATH/tailscale"
 unzip -qqo "$ZIPFILE" 'tailscale/binary-manifest.sh' -d "$MODPATH" 2>/dev/null || true
-unzip -qqjo "$ZIPFILE" "tailscale/bin/*-$ARCH" -d "$TS_BIN_DIR" 2>/dev/null || true
-for f in "$TS_BIN_DIR"/*-"$ARCH"; do
+unzip -qqjo "$ZIPFILE" "tailscale/bin/*-$ARCH" -d "$STAGE_BIN_DIR" 2>/dev/null || true
+for f in "$STAGE_BIN_DIR"/*-"$ARCH"; do
 	[ -f "$f" ] && mv "$f" "${f%-"$ARCH"}"
 done
 
-[ -f "$TS_BIN_DIR/tailscaled" ] || {
-	gh_download "anasfanani/tailscale-android-cli" "tailscale_.*_${ARCH}\.tgz" "TAILSCALE_${ARCH}" || abort "error: Unable to download."
-	tar -xzf "$TMPDIR/$FILENAME" -C "$TS_BIN_DIR" || abort "error: Unable extract archive."
+[ -f "$STAGE_BIN_DIR/tailscaled" ] || {
+	gh_download "TAILSCALE_${ARCH}" || abort "error: Unable to download."
+	tar -xzf "$TMPDIR/$FILENAME" -C "$STAGE_BIN_DIR" tailscaled || abort "error: Unable extract archive."
 }
 
-[ -f "$TS_BIN_DIR/jq" ] || {
-	gh_download "theshoqanebi/jq-build-for-android" "jq-${F_ARCH}-linux-android" "JQ_${ARCH}" || abort "error: Unable to download."
-	mv -f "$TMPDIR/$FILENAME" "$TS_BIN_DIR/jq" || abort "error: Unable to move file."
+[ -f "$STAGE_BIN_DIR/jq" ] || {
+	gh_download "JQ_${ARCH}" || abort "error: Unable to download."
+	mv -f "$TMPDIR/$FILENAME" "$STAGE_BIN_DIR/jq" || abort "error: Unable to move file."
 }
+
+for binary in "$STAGE_BIN_DIR/tailscaled" "$STAGE_BIN_DIR/jq"; do
+	[ -s "$binary" ] || abort "error: Missing staged binary $(basename "$binary")"
+done
+unzip -qqjo "$ZIPFILE" 'tailscale/scripts/*' -d "$STAGE_SCRIPTS_DIR" || abort "error: Unable to stage runtime scripts"
+unzip -qqjo "$ZIPFILE" 'tailscale/settings.sh' -d "$STAGE_TS_DIR" || abort "error: Unable to stage settings"
+for script in "$STAGE_SCRIPTS_DIR"/* "$STAGE_TS_DIR/settings.sh"; do
+	sh -n "$script" || abort "error: Invalid packaged shell script $(basename "$script")"
+done
+
+versionCode=none
+BACKUP_DIR="$TMPDIR/tailscale-empty-backup"
+mkdir -p "$BACKUP_DIR"
+had_existing_runtime=0
+daemon_was_running=0
+manual_stop_was_set=0
+if [ -d "$TS_DIR" ]; then
+	[ -e "$TS_DIR/settings.sh" ] && had_existing_runtime=1
+	busybox pgrep -x tailscaled >/dev/null 2>&1 && daemon_was_running=1
+	[ -f "$TS_DIR/run/manual-stop" ] && manual_stop_was_set=1
+	[ -f "$TS_DIR/tmp/tailscaled.state" ] && mv -f "$TS_DIR/tmp/tailscaled.state" "$TS_DIR/tailscaled.state"
+	PROP_FILE="$(echo "$MODPATH" | sed 's/_update//')/module.prop"
+	[ ! -f "$PROP_FILE" ] && PROP_FILE="$MODPATH/module.prop"
+	versionCode=$(grep '^versionCode=' "$PROP_FILE" | cut -d= -f2)
+	[ -n "$versionCode" ] || versionCode=unknown
+	if [ -f "$TS_DIR/config.env" ]; then
+		LIVE_CONFIG_FILE="$TS_DIR/config.env"
+		TS_DIR="$TS_DIR" TS_BIN_DIR="$STAGE_BIN_DIR" TS_CONFIG_FILE="$LIVE_CONFIG_FILE" TS_MOD_DIR="$MODPATH" TS_SCRIPTS_DIR="$STAGE_SCRIPTS_DIR" \
+			sh "$STAGE_SCRIPTS_DIR/tailscaled.config" validate >/dev/null 2>&1 || abort "error: Existing config.env is invalid; live installation was not changed"
+	fi
+	ui_print "- Backup old files"
+	# shellcheck source=tailscale/scripts/install.lib.sh
+	. "$STAGE_SCRIPTS_DIR/install.lib.sh"
+	BACKUP_DIR="$TS_DIR/backups/$versionCode"
+	rm -rf "$BACKUP_DIR"
+fi
 
 ui_print "- Extracting files..."
-unzip -qqo "$ZIPFILE" -x 'META-INF/*' 'tailscale/*' -d "$MODPATH"
+unzip -qqo "$ZIPFILE" -x 'META-INF/*' 'tailscale/*' -d "$MODPATH" || abort "error: Unable to extract module files"
 
-mkdir -p "$TS_DIR" "$TS_SCRIPTS_DIR" "$SERVICE_DIR" "$MODPATH/system/bin/"
-unzip -qqjo "$ZIPFILE" 'tailscale/scripts/*' -d "$TS_SCRIPTS_DIR"
-unzip -qqjo "$ZIPFILE" 'tailscale/settings.sh' -d "$TS_DIR"
-[ -f "$TS_DIR/config.env" ] || sh "$TS_SCRIPTS_DIR/tailscaled.config" init 2>/dev/null || true
+if [ ! -f "$STAGE_SCRIPTS_DIR/install.lib.sh" ]; then
+	abort "error: Missing installer transaction helper"
+fi
+# shellcheck source=tailscale/scripts/install.lib.sh
+. "$STAGE_SCRIPTS_DIR/install.lib.sh"
+install_committed=0
+runtime_switch_started=0
+rollback_install() {
+	code=$?
+	trap - EXIT HUP INT TERM
+	if [ "$install_committed" -ne 1 ] && [ "$runtime_switch_started" -eq 1 ]; then
+		ui_print "! Runtime switch failed; restoring previous files"
+		restore_runtime_data "$TS_DIR" "$BACKUP_DIR" || true
+		if [ "$manual_stop_was_set" -eq 1 ]; then
+			mkdir -p "$TS_DIR/run"
+			: >"$TS_DIR/run/manual-stop"
+		elif [ "$daemon_was_running" -eq 1 ] && [ -x "$TS_DIR/scripts/tailscaled.service" ]; then
+			"$TS_DIR/scripts/tailscaled.service" start >/dev/null 2>&1 || true
+		fi
+		[ -x "$TS_DIR/scripts/tailscaled.config" ] && "$TS_DIR/scripts/tailscaled.config" watchdog-sync >/dev/null 2>&1 || true
+	fi
+	exit "$code"
+}
+trap rollback_install EXIT HUP INT TERM
+
+mkdir -p "$TS_DIR" "$SERVICE_DIR" "$MODPATH/system/bin/"
+stop_watchdog "$TS_DIR"
+runtime_switch_started=1
+backup_runtime_data "$TS_DIR" "$BACKUP_DIR"
+install_staged_runtime "$STAGE_TS_DIR" "$TS_DIR" || abort "error: Unable to install staged runtime"
+if [ -f "$TS_DIR/config.env" ]; then
+	sh "$TS_SCRIPTS_DIR/tailscaled.config" migrate >/dev/null 2>&1 || abort "error: Existing config.env is invalid; previous runtime restored"
+else
+	sh "$TS_SCRIPTS_DIR/tailscaled.config" init 2>/dev/null || abort "error: Unable to initialize config.env"
+fi
 ln -sf "$TS_BIN_DIR/tailscaled" "$TS_BIN_DIR/tailscale"
 ln -sf "$TS_BIN_DIR/"* "$MODPATH/system/bin/"
 
@@ -145,6 +187,8 @@ set_perm_recursive "$TS_BIN_DIR/" 0 0 0755 0755 "u:object_r:system_file:s0"
 set_perm_recursive "$TS_SCRIPTS_DIR/" 0 0 0755 0755 "u:object_r:system_file:s0"
 set_perm_recursive "$MODPATH/system/bin/" 0 0 0755 0755 "u:object_r:system_file:s0"
 set_perm "$MODPATH/service.sh" 0 0 0755 "u:object_r:system_file:s0"
+install_committed=1
+trap - EXIT HUP INT TERM
 
 if [ ! -f "$SERVICE_DIR/tailscaled_service.sh" ]; then
 	# offer to move module scripts to general scripts
@@ -183,8 +227,13 @@ else
 	ui_print "- Move General Scripts."
 	mv -f "$MODPATH/service.sh" "$SERVICE_DIR/tailscaled_service.sh"
 fi
-ui_print "- Starting service in background."
-${TS_SCRIPTS_DIR}/start.sh postinstall 2>&1 &
+if [ "$had_existing_runtime" -eq 0 ] || [ "$daemon_was_running" -eq 1 ]; then
+	ui_print "- Starting service in background."
+	${TS_SCRIPTS_DIR}/start.sh postinstall 2>&1 &
+else
+	[ "$manual_stop_was_set" -eq 1 ] && : >"$TS_DIR/run/manual-stop"
+	${TS_SCRIPTS_DIR}/tailscaled.config watchdog-sync >/dev/null 2>&1 || true
+fi
 if [ ! -f "/system/bin/tailscale" ] || ! cmp --silent "/system/bin/tailscale" "$MODPATH/system/bin/tailscale"; then
 	ui_print "- Link file to /dev/."
 	ln -sf "$TS_SCRIPTS_DIR/tailscaled.service" /dev/tailscaled.service

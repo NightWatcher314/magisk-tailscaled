@@ -1,101 +1,135 @@
 name: Release
+
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      bump:
-        type: choice
-        description: 'Version bump type'
-        options:
-          - none
-          - major
-          - minor
-          - patch
-          - build
-        default: 'none'
+      tag:
+        description: Release Tag to create or verify, for example v2.4.0.0
+        required: true
+        type: string
+
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      EVENT_NAME: ${{ github.event_name }}
     steps:
-      - name: Checkout
+      - name: Checkout release source
         uses: actions/checkout@v4
-
-      - name: Bump version
-        if: github.event_name == 'workflow_dispatch' && inputs.bump != 'none'
-        run: ./.github/tools/version-bump.sh ${{ inputs.bump }}
-
-      - name: Sync version from tag
-        if: github.event_name == 'push'
-        run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/}"
-          CURRENT_VERSION=$(grep '^version=' module.prop | cut -d'=' -f2)
-          if [[ "$TAG_VERSION" != "$CURRENT_VERSION" ]]; then
-            echo "Tag $TAG_VERSION doesn't match module.prop $CURRENT_VERSION, updating..."
-            VERSION_NUM=${TAG_VERSION#v}
-            IFS='.' read -r MAJOR MINOR PATCH BUILD <<< "$VERSION_NUM"
-            VERSION_CODE=$(printf "%02d%02d%02d%02d" "$MAJOR" "$MINOR" "$PATCH" "$BUILD")
-            sed -i "s/^version=.*/version=$TAG_VERSION/" module.prop
-            sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" module.prop
-          fi
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION=$(grep '^version=' module.prop | cut -d'=' -f2)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          # Check if it's a build release (last digit is not 0)
-          BUILD=$(echo "$VERSION" | cut -d'.' -f4)
-          if [ "$BUILD" != "0" ]; then
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build
-        run: ./.github/tools/build.sh
-
-      - name: Create Release
-        id: release
-        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: Magisk Tailscaled ${{ steps.version.outputs.version }}
-          files: dist/*.zip
-          generate_release_notes: true
-          prerelease: ${{ steps.version.outputs.prerelease }}
-          append_body: true
-          body: |
-            ## Downloads
-            - **Magisk-Tailscaled-${{ steps.version.outputs.version }}.zip** - Lightweight (downloads binaries on install)
-            - **Magisk-Tailscaled-${{ steps.version.outputs.version }}-full.zip** - Complete package (includes all binaries)
-            
-            ## Download Stats
-            ![GitHub Downloads](https://img.shields.io/github/downloads/${{ github.repository }}/${{ steps.version.outputs.version }}/Magisk-Tailscaled-${{ steps.version.outputs.version }}.zip?style=flat&logo=docusign&logoColor=green&label=Lightweight)
-            ![GitHub Downloads](https://img.shields.io/github/downloads/${{ github.repository }}/${{ steps.version.outputs.version }}/Magisk-Tailscaled-${{ steps.version.outputs.version }}-full.zip?style=flat&logo=docusign&logoColor=green&label=Full%20Package)
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref_name }}
 
-      - name: Update JSON with release URLs
-        env:
-          ASSETS: ${{ steps.release.outputs.assets }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install shell validation tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck busybox mksh
+
+      - name: Resolve Tag and validate committed version
         run: |
-          ZIP_URL=$(echo '${{ steps.release.outputs.assets }}' | jq -r '.[] | select(.name | endswith(".zip") and (contains("-full") | not)) | .browser_download_url')
-          for json_file in update.json update-arm.json update-arm64.json; do
-            jq --arg url "$ZIP_URL" '.zipUrl = $url' "$json_file" > "${json_file}.tmp" && mv "${json_file}.tmp" "$json_file"
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch origin main --tags
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            git checkout --detach "refs/tags/$TAG^{commit}"
+            echo TAG_EXISTS=1 >>"$GITHUB_ENV"
+          else
+            test "$EVENT_NAME" = workflow_dispatch
+            git checkout --detach origin/main
+            echo TAG_EXISTS=0 >>"$GITHUB_ENV"
+          fi
+          git merge-base --is-ancestor HEAD origin/main
+          tests/test-version.sh "$TAG"
+          test -z "$(git status --short)"
+
+      - name: Build and test exact Tag
+        run: .github/tools/build.sh "$TAG"
+
+      - name: Create Tag after successful build
+        if: env.TAG_EXISTS == '0'
+        run: |
+          set -euo pipefail
+          git tag "$TAG" HEAD
+          git push origin "refs/tags/$TAG"
+          git fetch origin --tags
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+
+      - name: Create draft Release and upload exact assets
+        run: |
+          set -euo pipefail
+          cat >release-notes.md <<EOF
+          ## Downloads
+          - **Magisk-Tailscaled-${TAG}.zip** — lightweight, pinned binaries downloaded and SHA256-verified during install
+          - **Magisk-Tailscaled-${TAG}-full.zip** — complete offline package
+          - **SHA256SUMS** — checksums for both packages
+          EOF
+          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+          if [ -n "$release_id" ]; then
+            if [ "$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .draft)" = false ]; then
+              echo RELEASE_ALREADY_PUBLISHED=1 >>"$GITHUB_ENV"
+              exit 0
+            fi
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+          fi
+          gh release create "$TAG" --verify-tag --draft \
+              --title "Magisk Tailscaled $TAG" \
+              --notes-file release-notes.md \
+              "dist/Magisk-Tailscaled-${TAG}.zip" \
+              "dist/Magisk-Tailscaled-${TAG}-full.zip" \
+              dist/SHA256SUMS
+
+      - name: Download and verify draft assets
+        run: |
+          set -euo pipefail
+          mkdir release-readback
+          gh release download "$TAG" --dir release-readback
+          (cd release-readback && sha256sum -c SHA256SUMS)
+          for file in "Magisk-Tailscaled-${TAG}.zip" "Magisk-Tailscaled-${TAG}-full.zip" SHA256SUMS; do
+            local_sha=$(sha256sum "release-readback/$file" | awk '{print $1}')
+            remote_digest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq ".assets[] | select(.name == \"$file\") | .digest")
+            test "$remote_digest" = "sha256:$local_sha"
           done
 
-      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add module.prop update*.json CHANGELOG.md
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Bump version to ${{ steps.version.outputs.version }}"
-            if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-              git push
-            fi
+          git fetch origin main --tags
+          remote_main=$(git rev-parse origin/main)
+          remote_tag=$(git rev-parse "refs/tags/$TAG^{commit}")
+          test "$remote_tag" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$remote_tag" "$remote_main"
+
+          if [ "$remote_tag" = "$remote_main" ]; then
+            version_code=$(grep '^versionCode=' module.prop | cut -d= -f2)
+            expected_zip="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Magisk-Tailscaled-${TAG}.zip"
+            for file in update.json update-arm.json update-arm64.json; do
+              curl --fail --silent --show-error --location \
+                "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/${file}" |
+                jq -e --arg tag "$TAG" --arg code "$version_code" --arg zip "$expected_zip" \
+                  '.version == $tag and .versionCode == $code and .zipUrl == $zip' >/dev/null
+            done
           fi
+
+          if [ "${RELEASE_ALREADY_PUBLISHED:-0}" != 1 ]; then
+            gh release edit "$TAG" --draft=false
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" |
+            jq -e --arg tag "$TAG" '
+              .tag_name == $tag and .draft == false and .prerelease == false and
+              ([.assets[].name] | sort) == (["Magisk-Tailscaled-" + $tag + "-full.zip", "Magisk-Tailscaled-" + $tag + ".zip", "SHA256SUMS"] | sort)
+            ' >/dev/null

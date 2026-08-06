@@ -23,7 +23,7 @@
       <div class="hero-grid">
         <div><span>设备 IP</span><strong id="ip">-</strong></div>
         <div><span>Peers</span><strong id="peers">-</strong></div>
-        <div><span>Relay</span><strong id="relay">-</strong></div>
+        <div><span>本机 DERP</span><strong id="relay">-</strong></div>
       </div>
     </section>
 
@@ -35,16 +35,29 @@
         <button id="down" class="btn warning">断开</button>
         <button id="restart" class="btn ghost">重启 daemon</button>
       </div>
+      <div id="loginUrlBox" class="login-url hidden">
+        <div><span>登录 URL</span><a id="loginUrl" target="_blank" rel="noreferrer"></a></div>
+        <button id="copyLoginUrl" class="text-btn">复制</button>
+      </div>
       <div id="output" class="output" role="status">就绪。</div>
     </section>
 
     <section class="panel peer-panel">
       <div class="section-heading">
         <div><h2>Peers</h2><span id="peerCount" class="muted">正在读取…</span></div>
-        <button id="netcheck" class="text-btn">Netcheck</button>
+        <button id="netcheck" class="text-btn">运行 Netcheck</button>
       </div>
+      <p class="hint">状态路径来自最近活动流量；按需探测不会持续运行。</p>
       <div id="peerList" class="peer-list"><p class="hint">正在读取 Peer 状态…</p></div>
-      <pre id="netcheckOutput" class="output small hidden" aria-live="polite"></pre>
+      <div class="diagnostic-box">
+        <pre id="netcheckSummary" class="output small" aria-live="polite">尚未运行 Netcheck。</pre>
+        <details><summary>原始 Netcheck JSON</summary><pre id="netcheckRaw" class="output small">-</pre></details>
+      </div>
+    </section>
+
+    <section class="panel health-panel">
+      <div class="section-heading"><h2>健康中心</h2><div class="inline-actions"><button id="healthCheck" class="text-btn">运行健康检查</button><button id="copyReport" class="text-btn">复制脱敏报告</button></div></div>
+      <div id="healthGrid" class="health-grid"><p class="hint">按需检查 daemon、Backend、TUN、SELinux、配置、watchdog 与日志。</p></div>
     </section>
 
     <details class="panel" open>
@@ -64,8 +77,17 @@
     <details class="panel">
       <summary>设备与启动</summary>
       <label class="switch-row"><span>开机自动启动</span><input id="startOnBoot" type="checkbox"><i></i></label>
+      <label class="switch-row"><span>崩溃自动恢复<small>Watchdog 默认关闭；主动停止不会拉起</small></span><input id="watchdogEnabled" type="checkbox"><i></i></label>
       <label>Control server URL<input id="loginServer" type="url" inputmode="url" placeholder="https://headscale.example.com"></label>
       <label>设备名称<input id="hostname" placeholder="可选"></label>
+      <label>单份日志上限（KB）<input id="logMaxKb" type="number" inputmode="numeric" min="128" max="10240" step="128" value="1024"></label>
+    </details>
+
+    <details class="panel">
+      <summary>配置复制与导入</summary>
+      <p class="hint">只含 WebUI 管理字段；不含节点状态、节点密钥、SSH 私钥或证书。</p>
+      <textarea id="configTransfer" class="config-transfer" placeholder="导出后显示 JSON，或粘贴 JSON 后导入预览"></textarea>
+      <div class="inline-actions"><button id="exportConfig" class="btn ghost">复制配置</button><button id="importConfig" class="btn secondary">导入到表单</button></div>
     </details>
 
     <details class="panel">
@@ -81,7 +103,7 @@
       <pre id="log" class="output small">正在读取…</pre>
     </section>
 
-    <div class="sticky-save"><span id="dirty" class="hint">已保存</span><button id="save" class="btn primary">保存配置</button></div>
+    <div id="saveBar" class="sticky-save clean" aria-hidden="true"><span id="dirty" class="hint">有未保存修改</span><button id="save" class="btn primary">保存配置</button></div>
   </main>
   <script type="module" src="app.ts"></script>
 </body>
